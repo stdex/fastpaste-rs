@@ -1,0 +1,110 @@
+// Selection dialog: the hotkey popup listing snippets with keyboard
+// navigation (Up/Down/Enter/Esc). The Rust side sets the `snippets`
+// model and wires `paste-selected` / `closed` callbacks.
+//
+// Notes on keyboard handling: in Slint, only `FocusScope` (and `TextInput`)
+// declare the `key-pressed` callback. So the dialog wraps its content in a
+// `FocusScope` and the `Window` forwards focus to it. (`Rectangle`, `Text`,
+// `TouchArea`, `FocusScope` are builtins; only `ListView` is a widget.)
+//
+// Rows are two-line (title + first line of the body) so the user can tell
+// snippets apart without opening them.
+
+import { ListView } from "std-widgets.slint";
+import { Translations } from "translations.slint";
+import { Theme } from "widgets.slint";
+
+// One row in the dialog's list. Slint generates a Rust struct with matching
+// fields, accessible from Rust as `SnippetRow` after `slint::include_modules!()`.
+// Marked `export` so the root file (ui/main.slint) can re-export it alongside
+// the SelectionDialog component.
+export struct SnippetRow {
+    title: string,
+    body: string,
+}
+
+export component SelectionDialog inherits Window {
+    title: "fastpaste — " + Translations.selection-dialog-title;
+    preferred-width: 400px;
+    preferred-height: 340px;
+    background: Theme.surface;
+
+    // List of snippets, set from Rust.
+    in-out property <[SnippetRow]> snippets;
+
+    // Currently-selected index (clamped to 0 from Rust at show time).
+    in-out property <int> selected-index: 0;
+
+    // Emitted when the user picks a snippet (Enter or double-click).
+    callback paste-selected(int /* index */);
+    // Emitted when the user closes the dialog (Esc).
+    callback closed();
+
+    // The Window forwards keyboard focus to this scope; key events arrive
+    // here when the dialog has focus.
+    forward-focus: key-scope;
+
+    key-scope := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.UpArrow {
+                if root.selected-index > 0 {
+                    root.selected-index -= 1;
+                }
+                accept
+            } else if event.text == Key.DownArrow {
+                if root.selected-index < root.snippets.length - 1 {
+                    root.selected-index += 1;
+                }
+                accept
+            } else if event.text == Key.Return {
+                root.paste-selected(root.selected-index);
+                accept
+            } else if event.text == Key.Escape {
+                root.closed();
+                accept
+            } else {
+                reject
+            }
+        }
+    }
+
+    ListView {
+        for snippet[i] in root.snippets: Rectangle {
+            height: 42px;
+            background: i == root.selected-index
+                ? Theme.selection-bg
+                : touch.has-hover ? Theme.hover-bg : transparent;
+
+            VerticalLayout {
+                padding: Theme.spacing-s;
+                padding-left: 10px;
+                padding-right: 10px;
+                alignment: start;
+
+                Text {
+                    text: snippet.title;
+                    font-size: Theme.font-size;
+                    font-weight: i == root.selected-index ? 600 : 400;
+                    color: i == root.selected-index
+                        ? Theme.selection-fg : Theme.text;
+                    overflow: elide;
+                }
+                Text {
+                    text: snippet.body;
+                    font-size: Theme.font-size-s;
+                    color: Theme.text-muted;
+                    overflow: elide;
+                }
+            }
+
+            touch := TouchArea {
+                clicked => {
+                    root.selected-index = i;
+                }
+                double-clicked => {
+                    root.paste-selected(i);
+                }
+            }
+        }
+    }
+}

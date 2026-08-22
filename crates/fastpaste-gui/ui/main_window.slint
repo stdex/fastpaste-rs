@@ -1,0 +1,184 @@
+// Main Window. The tree pane uses the reusable `TreeView` component from
+// the `slint-tree-view` library crate (compiled as a Slint library module
+// via the `experimental-module-builds` feature — the crate comes from
+// crates.io: github.com/stdex/slint-tree-view). `TreeItem` is the
+// matching struct, also from `@TreeView`.
+//
+// All TreeView state is mirrored here in MainWindow properties (single
+// source of truth): the controller updates them in response to TreeView
+// callbacks, and the values flow back into the TreeView via bindings.
+//
+// Keyboard: the Window `forward-focus`es the TreeView, so arrow-key
+// navigation works as soon as the window opens (the TreeView declares
+// its own `forward-focus` to an internal FocusScope; without this line
+// key events never reach it).
+
+import { TreeView, TreeItem } from "@TreeView";
+import { TextEdit } from "std-widgets.slint";
+import { Translations } from "translations.slint";
+import { FButton, FLineEdit, Theme } from "widgets.slint";
+
+export component MainWindow inherits Window {
+    title: Translations.main-window-title;
+    preferred-width: 800px;
+    preferred-height: 500px;
+    background: Theme.surface;
+
+    // Tree model + current item (driven by the Rust controller).
+    // `in-out` here so MainWindow remains the single source of truth for
+    // the index — TreeView reads it via the binding below; we only ever
+    // write to it from our `current-changed` callback (which fires on
+    // TreeView's mouse/keyboard nav).
+    in-out property <[TreeItem]> tree-model;
+    in-out property <int> current-index: -1;
+
+    // Editor pane state.
+    in-out property <string> editor-title: "";
+    in-out property <string> editor-body: "";
+    in-out property <bool> editor-enabled: false;
+
+    // ---- Toolbar callbacks ----
+    callback add-folder-clicked();
+    callback add-plain-clicked();
+    callback delete-clicked();
+    callback move-up-clicked();
+    callback move-down-clicked();
+    // ---- Editor callbacks ----
+    callback title-edited(string);
+    callback body-edited(string);
+    // ---- Tree callbacks (forwarded from the embedded TreeView) ----
+    /// The current item changed (click or keyboard). The id lets the
+    /// controller correlate without tracking indices — but here we also
+    /// need the index for the editor pane, so we read it back from
+    /// `tree-model`.
+    callback current-changed(int /* internal-id */);
+    callback item-activated(int /* internal-id */);
+    callback item-expand-requested(int /* internal-id */);
+    callback item-collapse-requested(int /* internal-id */);
+    /// Recursive expand/collapse (Asterisk key or Shift+double-click on
+    /// a branch indicator). `depth == -1` means unlimited levels.
+    callback recursive-expand-requested(
+        int /* internal-id */, bool /* expand */, int /* depth */);
+    /// Left-arrow on a collapsed branch or leaf: move current to parent.
+    callback current-parent-change-requested(
+        int /* internal-id */, int /* parent-internal-id */);
+
+    // Arrow-key / Home / End / Enter navigation lands in the TreeView
+    // from the moment the window is shown.
+    forward-focus: tv;
+
+    VerticalLayout {
+        // Compact toolbar on a raised surface, separated by a hairline.
+        Rectangle {
+            height: Theme.control-height + 2 * 6px;
+            background: Theme.surface;
+
+            HorizontalLayout {
+                padding: 6px;
+                spacing: Theme.spacing-s;
+
+                FButton {
+                    text: Translations.toolbar-add-folder;
+                    clicked => { root.add-folder-clicked(); }
+                }
+                FButton {
+                    text: Translations.toolbar-add-snippet;
+                    clicked => { root.add-plain-clicked(); }
+                }
+                FButton {
+                    text: Translations.toolbar-delete;
+                    clicked => { root.delete-clicked(); }
+                }
+                FButton {
+                    text: "↑";
+                    clicked => { root.move-up-clicked(); }
+                }
+                FButton {
+                    text: "↓";
+                    clicked => { root.move-down-clicked(); }
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        // Two-pane: tree (left) + editor (right).
+        HorizontalLayout {
+            // Tree pane — the reusable TreeView from `slint-tree-view`.
+            // The TreeView reports interactions back via its callbacks;
+            // we mirror `current-index` here so MainWindow stays the
+            // single source of truth.
+            tv := TreeView {
+                preferred-width: 320px;
+                model: root.tree-model;
+                current-index: root.current-index;
+                // Main window is always "focused" — bind to real focus
+                // tracking if you want greyed selection when not frontmost.
+                focused: true;
+
+                current-changed(id) => {
+                    root.current-index = tv.current-index;
+                    root.current-changed(id);
+                }
+                item-activated(id) => {
+                    root.item-activated(id);
+                }
+                item-expand-requested(id) => {
+                    root.item-expand-requested(id);
+                }
+                item-collapse-requested(id) => {
+                    root.item-collapse-requested(id);
+                }
+                recursive-expand-requested(id, expand, depth) => {
+                    root.recursive-expand-requested(id, expand, depth);
+                }
+                current-parent-change-requested(id, parent-id) => {
+                    root.current-parent-change-requested(id, parent-id);
+                }
+            }
+
+            // Vertical separator.
+            Rectangle {
+                preferred-width: 1px;
+                background: Theme.border;
+            }
+
+            // Editor pane.
+            VerticalLayout {
+                padding: Theme.padding;
+                spacing: Theme.spacing;
+
+                Text {
+                    text: Translations.editor-title-label;
+                    font-size: Theme.font-size-s;
+                    color: Theme.text-muted;
+                }
+                FLineEdit {
+                    text <=> root.editor-title;
+                    enabled: root.current-index >= 0;
+                    edited(t) => {
+                        root.title-edited(t);
+                    }
+                }
+
+                Text {
+                    text: Translations.editor-body-label;
+                    font-size: Theme.font-size-s;
+                    color: Theme.text-muted;
+                }
+                // The one multiline editor: std TextEdit (fluent look is
+                // close enough to the in-house set; Slint exposes no
+                // multiline text primitive to build a custom one).
+                TextEdit {
+                    text: root.editor-body;
+                    enabled: root.editor-enabled;
+                    edited(b) => {
+                        root.body-edited(b);
+                    }
+                }
+            }
+        }
+    }
+}

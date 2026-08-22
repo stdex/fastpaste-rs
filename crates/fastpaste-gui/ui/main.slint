@@ -1,0 +1,27 @@
+// Root aggregator for every Slint component in this crate. `slint_build`
+// only emits one generated module per `compile()` call (the env var
+// `SLINT_INCLUDE_GENERATED` set by build.rs points at a single file), and
+// calling `compile()` twice overwrites it — so only the last component
+// would be visible to `slint::include_modules!()`.
+//
+// The fix is to compile just this one file and have it re-export every
+// exported component + struct from the other files. Imports use the
+// canonical `import { X } from "x.slint"` form; re-exports use the
+// `export { X };` form (see Slint docs: "The `.slint` File").
+
+import { SelectionDialog, SnippetRow } from "selection_dialog.slint";
+import { MainWindow } from "main_window.slint";
+import { OptionsDialog, LanguageOption } from "options_dialog.slint";
+import { FastpasteTray } from "tray_icon.slint";
+import { Translations } from "translations.slint";
+// TreeItem is re-exported from the @TreeView library (slint-tree-view crate)
+// so callers that build models in Rust still see it via this crate's root
+// after `slint::include_modules!()`.
+import { TreeItem } from "@TreeView";
+
+export { SelectionDialog, SnippetRow }
+export { MainWindow }
+export { OptionsDialog, LanguageOption }
+export { FastpasteTray }
+export { Translations }
+export { TreeItem }

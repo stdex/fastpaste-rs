@@ -1,0 +1,21 @@
+# Rust build artifacts.
+/target/
+**/*.rs.bk
+
+# Editor / IDE scratch files.
+.vscode/
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+
+# macOS / Windows / Linux desktop clutter.
+.DS_Store
+Thumbs.db
+
+# Local CI (act) cache.
+.act/
+
+# Local agent/tooling scratch (review diffs).
+.superpowers/

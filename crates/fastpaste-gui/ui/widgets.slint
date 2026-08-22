@@ -1,0 +1,529 @@
+// Compact in-house widget set + design tokens ("F" prefix = fastpaste).
+//
+// Why custom instead of std-widgets: the built-in widgets (fluent style)
+// enforce large minimum heights (~32-48px for LineEdit/ComboBox/TabWidget)
+// that cannot be shrunk from the outside, and the vertical TabWidget
+// assumes a dark sidebar backdrop (its inactive-tab text is invisible on
+// a white window — the "История буфера обмена" white-on-white bug). The
+// app is small (two dialogs + one toolbar), so a compact, flat, neutral
+// widget set gives full control over density and color with no style
+// fighting. std-widgets remains in use only for widgets that are fine
+// as-is (TextEdit, ListView, the tray's native Menu).
+//
+// Density: 28px controls, 4px radius, 1px borders, 13px text.
+// Only `TextEdit`'s look (fluent) differs slightly — acceptable for the
+// one multiline editor, and pinning the style in build.rs keeps it
+// deterministic across machines.
+
+// ─────────────────────────── design tokens ───────────────────────────
+
+export global Theme {
+    // Density.
+    out property <length> control-height: 28px;
+    out property <length> control-height-s: 24px;
+    out property <length> spacing: 8px;
+    out property <length> spacing-s: 4px;
+    out property <length> padding: 12px;
+    out property <length> radius: 4px;
+    out property <length> font-size: 13px;
+    out property <length> font-size-s: 12px;
+
+    // Neutrals (light theme).
+    out property <color> window-bg: #f2f3f5;   // window chrome / sidebar strip
+    out property <color> surface: #ffffff;     // cards, fields, toolbars
+    out property <color> border: #c9cdd4;
+    out property <color> border-strong: #a9aeb8;
+    out property <color> text: #212529;
+    out property <color> text-muted: #6a737d;
+    out property <color> hover-bg: #e9ecef;
+    out property <color> pressed-bg: #dee2e6;
+    out property <color> disabled-bg: #f0f1f3;
+
+    // Accent (selection, focus, primary buttons).
+    out property <color> accent: #2563eb;
+    out property <color> accent-hover: #3b74f0;
+    out property <color> accent-pressed: #1d4ed8;
+    out property <color> accent-foreground: #ffffff;
+    out property <color> selection-bg: #dbeafe;
+    out property <color> selection-fg: #1e40af;
+}
+
+// ───────────────────────────── FButton ───────────────────────────────
+
+// Compact 28px button. `primary` renders the accent-filled variant
+// (dialog default action); default is a neutral bordered button.
+export component FButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+
+    min-height: Theme.control-height;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    // The primary variant carries its own border so the 1px ring stays
+    // in the accent family; neutral buttons use the standard border.
+    border-color: root.primary ? Theme.accent : Theme.border;
+    background: root.primary ? Theme.accent : Theme.surface;
+
+    states [
+        disabled when !root.enabled : {
+            background: Theme.disabled-bg;
+            border-color: Theme.border;
+        }
+        pressed when touch.pressed && root.enabled : {
+            background: root.primary ? Theme.accent-pressed : Theme.pressed-bg;
+            border-color: root.primary ? Theme.accent-pressed : Theme.border-strong;
+        }
+        hover when touch.has-hover && root.enabled : {
+            background: root.primary ? Theme.accent-hover : Theme.hover-bg;
+            border-color: root.primary ? Theme.accent-hover : Theme.border-strong;
+        }
+    ]
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+
+        label := Text {
+            text: root.text;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-size: Theme.font-size;
+            color: !root.enabled ? Theme.text-muted
+                : root.primary ? Theme.accent-foreground
+                : Theme.text;
+            overflow: elide;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ──────────────────────────── FLineEdit ──────────────────────────────
+
+// Compact 28px single-line editor built on the builtin `TextInput`
+// (same primitive std-widgets' LineEdit wraps). Click anywhere in the
+// field to focus; focus paints the accent border.
+export component FLineEdit inherits Rectangle {
+    in-out property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> read-only: false;
+    in property <InputType> input-type: InputType.text;
+    callback edited(string);
+    callback accepted(string);
+
+    accessible-role: text-input;
+    accessible-enabled: root.enabled;
+    accessible-value <=> root.text;
+
+    min-height: Theme.control-height;
+    min-width: 64px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
+    background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+    forward-focus: input;
+
+    input := TextInput {
+        x: 8px;
+        width: parent.width - 16px;
+        // Vertical centering by absolute placement — layouts would
+        // stretch the TextInput to the full row height.
+        y: (parent.height - self.preferred-height) / 2;
+        text <=> root.text;
+        enabled: root.enabled;
+        read-only: root.read-only;
+        input-type: root.input-type;
+        font-size: Theme.font-size;
+        color: root.enabled ? Theme.text : Theme.text-muted;
+        vertical-alignment: center;
+        // TextInput's edited/accepted callbacks carry no arguments in
+        // Slint 1.17 — the fresh text is read from the property.
+        edited => { root.edited(input.text); }
+        accepted => { root.accepted(input.text); }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { input.focus(); }
+    }
+}
+
+// ──────────────────────────── FComboBox ──────────────────────────────
+
+// Compact 28px combo box. The popup is a plain bordered surface with
+// 26px rows (accent tint + accent text on the current row) and supports
+// Up/Down/Enter/Escape while open.
+export component FComboBox inherits Rectangle {
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    in property <bool> enabled: true;
+    callback selected(/* value */ string);
+
+    out property <string> current-value:
+        root.current-index >= 0 && root.current-index < root.model.length
+            ? root.model[root.current-index]
+            : "";
+
+    accessible-role: combobox;
+    accessible-enabled: root.enabled;
+
+    min-height: Theme.control-height;
+    min-width: 96px;
+    horizontal-stretch: 1;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+    states [
+        pressed when touch.pressed : {
+            background: Theme.pressed-bg;
+            border-color: Theme.border-strong;
+        }
+        hover when touch.has-hover : {
+            background: Theme.hover-bg;
+            border-color: Theme.border-strong;
+        }
+    ]
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: Theme.spacing-s;
+
+        Text {
+            text: root.current-value;
+            vertical-alignment: center;
+            font-size: Theme.font-size;
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+        Text {
+            text: "▾";
+            width: 12px;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+            font-size: Theme.font-size;
+            color: Theme.text-muted;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => { popup.show(); }
+    }
+
+    popup := PopupWindow {
+        x: 0;
+        y: root.height + Theme.spacing-s;
+        width: root.width;
+        close-policy: close-on-click-outside;
+        forward-focus: popup-keys;
+
+        popup-keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.UpArrow) {
+                    if (root.current-index > 0) {
+                        root.current-index -= 1;
+                    }
+                    accept
+                } else if (event.text == Key.DownArrow) {
+                    if (root.current-index < root.model.length - 1) {
+                        root.current-index += 1;
+                    }
+                    accept
+                } else if (event.text == Key.Return) {
+                    root.selected(root.current-value);
+                    popup.close();
+                    accept
+                } else if (event.text == Key.Escape) {
+                    popup.close();
+                    accept
+                } else {
+                    reject
+                }
+            }
+        }
+
+        Rectangle {
+            border-radius: Theme.radius;
+            border-width: 1px;
+            border-color: Theme.border;
+            background: Theme.surface;
+
+            VerticalLayout {
+                padding: Theme.spacing-s;
+
+                for value[i] in root.model: Rectangle {
+                    height: 26px;
+                    border-radius: 3px;
+                    background: i == root.current-index
+                        ? Theme.selection-bg
+                        : row-touch.has-hover ? Theme.hover-bg : transparent;
+
+                    Text {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        text: value;
+                        vertical-alignment: center;
+                        font-size: Theme.font-size;
+                        color: i == root.current-index
+                            ? Theme.selection-fg : Theme.text;
+                        overflow: elide;
+                    }
+
+                    row-touch := TouchArea {
+                        clicked => {
+                            root.current-index = i;
+                            root.selected(value);
+                            popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ──────────────────────────── FCheckBox ──────────────────────────────
+
+export component FCheckBox inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+    in property <bool> enabled: true;
+    callback toggled();
+
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-checked <=> root.checked;
+
+    min-height: Theme.control-height;
+
+    HorizontalLayout {
+        padding-left: Theme.spacing-s;
+        spacing: Theme.spacing;
+
+        box := Rectangle {
+            width: 16px;
+            height: 16px;
+            y: (parent.height - self.height) / 2;
+            border-radius: 3px;
+            border-width: 1px;
+            border-color: !root.enabled ? Theme.border
+                : root.checked ? Theme.accent : Theme.border-strong;
+            background: root.checked && root.enabled
+                ? Theme.accent : Theme.surface;
+
+            Text {
+                text: "✓";
+                visible: root.checked;
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 11px;
+                font-weight: 700;
+                color: Theme.accent-foreground;
+            }
+        }
+
+        Text {
+            text: root.text;
+            vertical-alignment: center;
+            font-size: Theme.font-size;
+            color: root.enabled ? Theme.text : Theme.text-muted;
+            overflow: elide;
+            horizontal-stretch: 1;
+        }
+    }
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.checked = !root.checked;
+            root.toggled();
+        }
+    }
+}
+
+// ──────────────────────────── FSpinBox ───────────────────────────────
+
+// Compact [- value +] spinner. The value field is an editable
+// `InputType.number` TextInput; garbage input falls back to the minimum
+// (NaN saturates to 0 in the int cast, then clamps).
+export component FSpinBox inherits Rectangle {
+    in-out property <int> value;
+    in property <int> minimum: 0;
+    in property <int> maximum: 100;
+    in property <bool> enabled: true;
+    callback value-changed(int);
+
+    min-height: Theme.control-height;
+    min-width: 110px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: root.enabled ? Theme.surface : Theme.disabled-bg;
+
+    function clamp(v: int) -> int {
+        Math.max(root.minimum, Math.min(root.maximum, v))
+    }
+
+    HorizontalLayout {
+        padding: 1px;
+        spacing: 1px;
+
+        dec := Rectangle {
+            width: 24px;
+            border-radius: 3px;
+            background: dec-touch.has-hover
+                ? (dec-touch.pressed ? Theme.pressed-bg : Theme.hover-bg)
+                : transparent;
+
+            Text {
+                text: "−";
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 13px;
+                color: root.enabled && root.value > root.minimum
+                    ? Theme.text : Theme.text-muted;
+            }
+            dec-touch := TouchArea {
+                enabled: root.enabled && root.value > root.minimum;
+                clicked => {
+                    root.value = root.clamp(root.value - 1);
+                    root.value-changed(root.value);
+                }
+            }
+        }
+
+        field := Rectangle {
+            horizontal-stretch: 1;
+            input := TextInput {
+                x: 4px;
+                width: parent.width - 8px;
+                y: (parent.height - self.preferred-height) / 2;
+                text: root.value;
+                enabled: root.enabled;
+                input-type: InputType.number;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: Theme.font-size;
+                color: root.enabled ? Theme.text : Theme.text-muted;
+                edited => {
+                    if (!input.text.is-empty) {
+                        root.value = root.clamp(Math.round(input.text.to-float()));
+                        // Re-normalize the field (drops stray characters
+                        // and clamps out-of-range typing).
+                        input.text = root.value;
+                    }
+                }
+                accepted => { input.text = root.value; }
+            }
+        }
+
+        inc := Rectangle {
+            width: 24px;
+            border-radius: 3px;
+            background: inc-touch.has-hover
+                ? (inc-touch.pressed ? Theme.pressed-bg : Theme.hover-bg)
+                : transparent;
+
+            Text {
+                text: "+";
+                width: 100%;
+                height: 100%;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                font-size: 13px;
+                color: root.enabled && root.value < root.maximum
+                    ? Theme.text : Theme.text-muted;
+            }
+            inc-touch := TouchArea {
+                enabled: root.enabled && root.value < root.maximum;
+                clicked => {
+                    root.value = root.clamp(root.value + 1);
+                    root.value-changed(root.value);
+                }
+            }
+        }
+    }
+}
+
+// ───────────────────────────── FSidebar ──────────────────────────────
+
+// Compact vertical navigation sidebar (replaces TabWidget for the
+// Options dialog). Full-contrast text on a light strip — the inactive
+// rows are always readable, and the active row carries both a tint and
+// an accent bar so selection survives any backdrop.
+export component FSidebar inherits Rectangle {
+    in property <[string]> items;
+    in-out property <int> current-index: 0;
+    callback changed(/* index */ int);
+
+    // Wide enough for the longest shipped tab title ("История буфера
+    // обмена" at 13px ≈ 165px of glyphs + leading pad + accent bar) —
+    // narrower values elide it.
+    min-width: 190px;
+    background: Theme.window-bg;
+
+    VerticalLayout {
+        padding: Theme.spacing-s;
+        alignment: start;
+
+        for title[i] in root.items: Rectangle {
+            height: 30px;
+            border-radius: Theme.radius;
+            background: i == root.current-index
+                ? Theme.selection-bg
+                : row.has-hover ? Theme.hover-bg : transparent;
+
+            // Accent bar on the leading edge of the active row.
+            Rectangle {
+                x: 0;
+                y: 5px;
+                width: 3px;
+                height: parent.height - 10px;
+                border-radius: 1.5px;
+                background: i == root.current-index
+                    ? Theme.accent : transparent;
+            }
+
+            Text {
+                x: 14px;
+                width: parent.width - 18px;
+                text: title;
+                vertical-alignment: center;
+                font-size: Theme.font-size;
+                font-weight: i == root.current-index ? 600 : 400;
+                color: i == root.current-index
+                    ? Theme.selection-fg : Theme.text;
+                overflow: elide;
+            }
+
+            row := TouchArea {
+                clicked => {
+                    if (root.current-index != i) {
+                        root.current-index = i;
+                        root.changed(i);
+                    }
+                }
+            }
+        }
+    }
+}

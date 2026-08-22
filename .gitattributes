@@ -1,0 +1,5 @@
+# Normalize text files to LF in the repository; check out as-is on Linux.
+* text=auto eol=lf
+
+# Binary assets.
+*.png binary

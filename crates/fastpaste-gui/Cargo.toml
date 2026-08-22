@@ -1,0 +1,28 @@
+[package]
+name = "fastpaste-gui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "fastpaste-gui"
+path = "src/main.rs"
+
+[dependencies]
+slint.workspace = true
+slint-tree-view.workspace = true
+fastpaste-app = { path = "../fastpaste-app" }
+fastpaste-platform = { path = "../fastpaste-platform" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+fluent-templates.workspace = true
+sys-locale.workspace = true
+fastpaste-data = { path = "../fastpaste-data" }
+
+[dev-dependencies]
+chrono.workspace = true
+fluent-syntax.workspace = true
+
+[build-dependencies]
+slint-build = { workspace = true, features = ["experimental-module-builds"] }

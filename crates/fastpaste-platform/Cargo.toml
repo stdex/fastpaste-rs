@@ -1,0 +1,18 @@
+[package]
+name = "fastpaste-platform"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+evdev = "0.13"
+arboard = { version = "3.6", features = ["wayland-data-control"] }
+# Watching only. arboard's wayland-data-control feature already pulls
+# wl-clipboard-rs in for native reads/writes, but that crate has no watch
+# API in any published version (verified against docs.rs, 2026-08) — the
+# watch surface lives only in the separate wl-clipboard-rs-tools binary.
+wl-clipboard-watch = "0.1"
+libc = "0.2"   # poll(2) for the hotkey reader's blocking loop; no new lock entries (x11rb dep)
+thiserror.workspace = true
+tracing.workspace = true
+x11rb = "0.13"

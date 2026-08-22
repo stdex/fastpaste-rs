@@ -1,0 +1,81 @@
+// System tray icon.
+//
+// Uses Slint's **native** `SystemTrayIcon` element (added in Slint 1.17),
+// NOT the external `tray-icon` crate. The external crate requires a
+// separate GTK event loop on Linux which collides with Slint's own loop;
+// Slint's built-in element shares the same loop as `run_event_loop_*`,
+// which is exactly what we need for `run_event_loop_until_quit()`.
+//
+// Behavior:
+//   - Left-click → `toggle-main-window` callback (controller shows/hides
+//     the persistent Main Window, same as Ctrl+Shift+U).
+//   - Right-click → context menu with 4 entries + a separator.
+//     Each `activated => { <cb>() }` calls back into Rust.
+//
+// The labels are exposed as in-out `string` properties so the controller
+// can localize them via `i18n.msg("tray-...")` — the C++ reference bakes
+// the strings in, but the i18n infrastructure is here, so we use it.
+//
+// The icon image is referenced via `@image-url("...")` and resolved by
+// the build script. Slint's `slint_build::compile` looks up assets in
+// the same directory tree as the .slint file; the binary lives at
+// `ui/assets/tray.png`. Until we ship a real PNG we omit `icon:` —
+// the tray still works (the platform draws a default), and the visible
+// affordance is the tooltip. A TODO comment marks the asset wiring.
+
+import { Translations } from "translations.slint";
+
+export component FastpasteTray inherits SystemTrayIcon {
+    // Embedded PNG icon (32x32 navy 'F'). `slint_build::compile` resolves
+    // `@image-url` against the .slint file's directory, so the path is
+    // `assets/tray.png` relative to `ui/tray_icon.slint`. The bytes are
+    // baked into the binary at compile time — no runtime file access.
+    icon: @image-url("assets/tray.png");
+
+    in-out property <string> tooltip-text: Translations.app-title;
+
+    // Menu-item labels. These bind to the `Translations` global (like every
+    // other UI string), so switching the language at runtime re-localizes
+    // the tray along with the windows — no per-window bookkeeping here.
+    in-out property <string> label-open-main-window: Translations.tray-open-main-window;
+    in-out property <string> label-selection-dialog: Translations.tray-selection-dialog;
+    in-out property <string> label-options: Translations.tray-options;
+    in-out property <string> label-quit: Translations.tray-quit;
+
+    // The `tooltip` property inherited from SystemTrayIcon isn't auto-wired
+    // to the host language; alias it through `tooltip-text` so the binding
+    // above drives it.
+    tooltip: root.tooltip-text;
+
+    // Callbacks to the controller. Every menu item fires one of these.
+    callback toggle-main-window();
+    callback open-main-window();
+    callback open-selection-dialog();
+    callback open-options();
+    callback quit();
+
+    // Left-click (platforms that don't auto-popup the menu on left-click).
+    clicked => {
+        root.toggle-main-window();
+    }
+
+    if root.visible : Menu {
+        MenuItem {
+            title: root.label-open-main-window;
+            activated => { root.open-main-window(); }
+        }
+        MenuItem {
+            title: root.label-selection-dialog;
+            activated => { root.open-selection-dialog(); }
+        }
+        MenuItem {
+            title: root.label-options;
+            activated => { root.open-options(); }
+        }
+        MenuSeparator {}
+        MenuItem {
+            title: root.label-quit;
+            activated => { root.quit(); }
+        }
+    }
+}

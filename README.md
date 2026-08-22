@@ -1,0 +1,191 @@
+# fastpaste-rs
+
+Clipboard history + snippet manager for Linux, written in Rust.
+Targets Wayland (KDE Plasma 6 / KWin).
+Global hotkeys are grabbed via XGrabKey on XWayland, so the session must have XWayland available. 
+X11 sessions are not supported.
+
+## Features
+
+- Main window: snippet/folder tree (CRUD) with an editor pane and toolbar
+- Selection dialog: keyboard-driven quick-paste popup
+- Options dialog: general / hotkeys / clipboard-history / paste settings,
+  applied live (hotkey changes re-register immediately)
+- Global hotkeys (defaults, configurable): `Ctrl+U` → selection dialog,
+  `Ctrl+Shift+U` → main window; layout-independent physical-keycode grabs
+  that work under any keyboard layout
+- Clipboard history folder: bounded ring populated by watching the system
+  clipboard (wlr-data-control), rendered as a virtual folder in the tree
+- Paste via `/dev/uinput` Ctrl+V emulation, with the previous clipboard
+  contents restored afterwards
+- System tray icon with context menu (Slint native `SystemTrayIcon`)
+- Localization: English, Russian, German, Spanish, Simplified Chinese
+- Single-instance guard (abstract unix socket, kernel-released on exit)
+
+## Build prerequisites (Linux)
+
+- Rust 1.95+ (rustup recommended)
+- `libfontconfig1-dev` (required by Slint):
+  ```
+  sudo apt install libfontconfig1-dev
+  ```
+- A Wayland session (KDE Plasma 6 / KWin target) with XWayland available
+  (global hotkeys grab via XGrabKey on the XWayland root window).
+- For paste via `/dev/uinput`: the user must have read/write access to
+  `/dev/uinput`. systemd-logind typically grants this via ACL on login for
+  physical sessions; check with `getfacl /dev/uinput`.
+
+## Build
+
+```
+cargo build --release
+```
+
+## Run
+
+```
+cargo run --release --bin fastpaste-gui
+```
+
+## Workspace crates
+
+Four crates layered bottom-up. `app` imports `data` + `platform`; `gui`
+imports all three (it uses `data` types and `platform` hotkey ids directly,
+not only through `app`):
+
+### `fastpaste-data` — storage layer
+
+No GUI, no platform code, no I/O beyond SQLite.
+
+- `item.rs` — `Item` / `ItemKind`: the snippet/folder value type that
+  crosses all layers (plain copyable struct, serde + chrono timestamps)
+- `database.rs` — `Database`: SQLite CRUD for items and folders
+- `error.rs` — `DataError`, the layer's error enum
+- `migrations/` — refinery SQL migrations (`V001__initial_schema.sql`)
+
+### `fastpaste-platform` — Linux platform layer
+
+Everything that touches the OS/desktop environment:
+
+- `hotkey.rs` — `GlobalHotkey` trait + `X11GlobalHotkey` (XGrabKey on the
+  XWayland root window, layout-independent physical keycodes), and the
+  `OPEN_DIALOG_ID` / `OPEN_MAIN_WINDOW_ID` action ids
+- `clipboard.rs` — `Clipboard` trait + `ArboardClipboard` (read/write via
+  data-control) and the `wl-clipboard-watch`-based change watcher with an
+  arboard-polling fallback
+- `uinput.rs` — `EvdevUinputCtrlV` / `NullUinputCtrlV`: `/dev/uinput`
+  Ctrl+V emulation, degrading gracefully when the device is unavailable
+- `take_once.rs` — `TakeOnceChannel`, a one-shot hand-off primitive used
+  by the hotkey event path
+
+### `fastpaste-app` — service layer
+
+Orchestrates data + platform into long-lived services:
+
+- `context.rs` — `AppContext`: composition root bundling every service
+  behind `Arc` for the UI controllers, plus the single-instance guard
+- `settings.rs` — `Settings`: typed `config.toml` load/save (confy),
+  grouped into general / hotkeys / clipboard-history / paste sections
+- `clipboard_history.rs` — `ClipboardHistory`: the bounded ring fed by the
+  clipboard watcher, exposed as a virtual folder
+- `paster.rs` — `Paster`: the paste sequence (set clipboard → delay →
+  Ctrl+V via uinput → restore previous clipboard)
+- `paths.rs` — single source of truth for XDG `config_dir` / `data_dir`
+
+### `fastpaste-gui` — Slint frontend (binary `fastpaste-gui`)
+
+- `ui/main_window.slint` — snippet tree + editor + toolbar
+- `ui/selection_dialog.slint` — the quick-paste popup
+- `ui/options_dialog.slint` — settings dialog
+- `ui/tray_icon.slint` — `FastpasteTray` (native `SystemTrayIcon` + menu)
+- `ui/widgets.slint` — compact in-house widget set + design tokens
+- `ui/translations.slint` — global singleton carrying every UI string
+- `src/tree_builder.rs` — flattens `Item` rows + history entries into the
+  `TreeItem` list consumed by the TreeView
+- `src/i18n.rs` — fluent runtime (embedded `.ftl`, per-locale fallback,
+  live language switch)
+- `src/main.rs` — controllers wiring Slint callbacks/hotkey events to
+  `AppContext`
+- `build.rs` — `slint_build` compilation of the `.slint` files
+
+## Data & configuration
+
+| What | Path |
+|---|---|
+| Settings | `~/.config/fastpaste/config.toml` |
+| Database | `~/.local/share/fastpaste/fastpaste.sqlite` |
+
+The config file is created on first save with these defaults. Missing
+fields fall back to their defaults, so a config written by an older version
+keeps loading after upgrades:
+
+```toml
+[general]
+language = "system"          # "system" follows the OS locale; or a BCP-47 tag
+
+[hotkeys]
+open_dialog = "Ctrl+U"
+open_main_window = "Ctrl+Shift+U"
+
+[clipboard_history]
+enabled = true
+max_items = 10
+position = "bottom"          # "top" | "bottom"
+
+[paste]
+delay_ms = 70                # pause between clipboard set and Ctrl+V
+restore_clipboard = true     # put the previous clipboard back after paste
+```
+
+## Dependencies
+
+Shared versions are pinned in the workspace root `Cargo.toml`
+(`[workspace.dependencies]`); each crate pulls from there via
+`dependency.workspace = true`.
+
+| Crate | Used by | Purpose |
+|---|---|---|
+| `slint` | gui | Declarative UI toolkit: main window, dialogs, system tray |
+| `slint-tree-view` | gui | Slint TreeView component for the snippet tree |
+| `slint-build` | gui (build) | Compiles `.slint` files at build time; `experimental-module-builds` feature resolves `import { TreeView } from "@TreeView"` against the library crate |
+| `fluent-templates` | gui | Fluent static loader: embeds the `.ftl` files at compile time, per-key fallback chain to English |
+| `sys-locale` | gui | Resolves the `"system"` language setting from the OS locale |
+| `fluent-syntax` | gui (dev) | Parses `.ftl` sources in the key-parity test |
+| `tracing` | platform, app, gui | Structured logging |
+| `tracing-subscriber` | gui | Log output with `RUST_LOG` env-filter support |
+| `anyhow` | app, gui | Ergonomic error handling at the service/main level |
+| `thiserror` | data, platform, app | Derive error enums for each layer's error type |
+| `rusqlite` (features `bundled`, `chrono`) | data | SQLite driver; `bundled` builds the C library in, `chrono` gives native `DateTime<Utc>` ↔ TEXT conversion |
+| `refinery` | data | SQL migrations (`fastpaste-data/migrations/`) |
+| `serde` | data, app | Serialization: `Item` rows and `config.toml` |
+| `chrono` | data, app, gui (dev) | Timestamps: RFC 3339 in the DB, history entry times |
+| `directories` | app | XDG `data_dir`/`config_dir` resolution |
+| `confy` | app | TOML config load/save |
+| `single-instance` | app | Single-instance guard: abstract unix socket keyed on the data dir (no lock file, kernel-released on exit) |
+| `arboard` (feature `wayland-data-control`) | platform | Clipboard read/write (`set_text`/`text`): native data-control protocol on Wayland — the same transport as the watcher — with arboard's X11 backend as fallback when the compositor offers no data-control |
+| `wl-clipboard-watch` | platform | Event-driven clipboard change detection (ext/wlr-data-control); the platform layer falls back to arboard polling when neither protocol is available |
+| `evdev` | platform | `/dev/uinput` virtual keyboard to emit Ctrl+V; `KeyCode: FromStr` also resolves hotkey key names to physical kernel keycodes |
+| `x11rb` | platform | XGrabKey global hotkeys on XWayland — physical keycodes, layout-independent (the `global-hotkey` crate resolves keysyms via the core keymap and fails under Cyrillic layouts); `GetModifierMapping` resolves real Alt/NumLock/Super modifier bits |
+| `libc` | platform | `poll(2)` for the hotkey reader's blocking loop (wakes on X traffic or a wake-pipe byte); already a transitive dep of x11rb |
+| `tempfile` | data, app (dev) | Temp directories in tests |
+| `serde_json` | data (dev) | Serde round-trip asserts in tests (enum `#[serde(...)]` attributes) |
+
+Version constraints worth knowing when upgrading:
+
+- `slint`, `slint-build`, and `slint-tree-view` are all pinned in the
+  workspace root `[workspace.dependencies]` and must stay on compatible
+  versions — the TreeView library exports `.slint` types compiled against
+  the same Slint compiler.
+- `fluent-templates` 0.15 (fluent-bundle 0.16, fluent-syntax 0.12,
+  unic-langid 0.9) and the dev-only `fluent-syntax` 0.12 share the same
+  `unic-langid-impl` major; mixing older majors conflicts.
+- `wl-clipboard-rs` (pulled in transitively by arboard's
+  `wayland-data-control` feature) exposes **no watch API** in any
+  published version — its watch surface lives only in the separate
+  `wl-clipboard-rs-tools` binary (verified against docs.rs, 2026-08).
+  Clipboard *watching* therefore stays on `wl-clipboard-watch`; don't
+  "simplify" it away in favor of the transitive `wl-clipboard-rs`.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

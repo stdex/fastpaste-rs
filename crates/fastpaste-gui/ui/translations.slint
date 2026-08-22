@@ -1,0 +1,64 @@
+// Global singleton carrying every user-visible string. All UI surfaces
+// (MainWindow toolbar + editor labels, OptionsDialog, SelectionDialog
+// title, tray menu) bind their text to `Translations.<key>` instead of
+// hardcoding English, and the Rust controller pushes localized values in
+// via `apply_translations()` (main.rs) — once at startup and again
+// whenever the language setting changes. Because Slint bindings are
+// reactive, one push re-renders every open window and the tray; no
+// restart, no per-window bookkeeping.
+//
+// Property names mirror the fluent keys in `i18n/en.ftl` one-to-one
+// (kebab-case here, snake_case setters in Rust). The defaults below are
+// English so .slint previews render sensibly before Rust runs; the
+// ↑/↓ toolbar arrows are universal symbols and never overwritten.
+
+export global Translations {
+    // Window titles.
+    in-out property <string> app-title: "fastpaste";
+    in-out property <string> main-window-title: "fastpaste";
+
+    // Main Window toolbar + editor pane. The emoji icons stay fixed; only
+    // the trailing text is localized (Rust composes "📁 " + translation).
+    in-out property <string> toolbar-add-folder: "📁 Folder";
+    in-out property <string> toolbar-add-snippet: "📄 Snippet";
+    in-out property <string> toolbar-delete: "🗑 Delete";
+    in-out property <string> toolbar-move-up: "↑";
+    in-out property <string> toolbar-move-down: "↓";
+    in-out property <string> editor-title-label: "Title:";
+    in-out property <string> editor-body-label: "Body:";
+
+    // Selection dialog.
+    in-out property <string> selection-dialog-title: "Select a string to paste";
+
+    // Tray menu.
+    in-out property <string> tray-open-main-window: "Open Main Window";
+    in-out property <string> tray-selection-dialog: "Selection Dialog";
+    in-out property <string> tray-options: "Options...";
+    in-out property <string> tray-quit: "Quit";
+
+    // Options dialog: tab titles, buttons, form labels, hints.
+    in-out property <string> options-title: "Options";
+    in-out property <string> options-general: "General";
+    in-out property <string> options-hotkeys: "Hot Keys";
+    in-out property <string> options-clipboard-history: "Clipboard History";
+    in-out property <string> options-paste: "Paste Options";
+    in-out property <string> options-language-label: "Language:";
+    in-out property <string> options-language-hint: "Select the application language. \"System\" follows your OS locale.";
+    in-out property <string> options-open-dialog-label: "Open selection dialog:";
+    in-out property <string> options-open-main-window-label: "Open Main Window:";
+    in-out property <string> options-hotkeys-hint: "Modifiers: Ctrl, Alt, Shift, Super. Combine with \"+\". Example: Ctrl+U";
+    in-out property <string> options-capture-history: "Capture clipboard changes";
+    in-out property <string> options-max-items-label: "Maximum items:";
+    in-out property <string> options-folder-position-label: "Folder position:";
+    in-out property <string> options-position-top: "Top";
+    in-out property <string> options-position-bottom: "Bottom";
+    in-out property <string> options-paste-delay-label: "Paste delay (ms):";
+    in-out property <string> options-restore-clipboard: "Restore clipboard contents after pasting";
+    in-out property <string> options-ok: "OK";
+    in-out property <string> options-cancel: "Cancel";
+    in-out property <string> options-apply: "Apply";
+
+    // Virtual tree folder fed by the clipboard history ring buffer
+    // (the label lives in the Rust-built tree model, not a binding).
+    in-out property <string> clipboard-history-folder: "Clipboard History";
+}

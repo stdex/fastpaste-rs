@@ -1,0 +1,16 @@
+[package]
+name = "fastpaste-data"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+refinery = { version = "0.9", features = ["rusqlite"] }
+serde.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+serde_json = "1"
