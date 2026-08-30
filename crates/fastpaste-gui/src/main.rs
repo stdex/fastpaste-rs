@@ -10,8 +10,8 @@
 //
 // Two global hotkeys (driven by Settings.hotkeys, with startup fallback
 // to the defaults so a bad config.toml never aborts the app):
-//   Ctrl+U        (default) → OPEN_DIALOG_ID  → SelectionDialog
-//   Ctrl+Shift+U  (default) → OPEN_MAIN_WINDOW_ID → MainWindow
+//   Ctrl+Alt+V        (default) → OPEN_DIALOG_ID      → SelectionDialog
+//   Ctrl+Alt+M        (default) → OPEN_MAIN_WINDOW_ID → MainWindow
 //
 // Tray icon (Slint native SystemTrayIcon, not the external tray-icon
 // crate): left-click toggles Main Window, right-click shows a context

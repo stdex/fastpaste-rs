@@ -45,9 +45,9 @@ pub enum HotkeyError {
 /// incoming ids against the actions it knows.
 pub const OPEN_DIALOG_ID: u32 = 1;
 
-/// Second hotkey: Ctrl+Shift+U → open the persistent Main Window
-/// (CRUD editor). The Selection Dialog (id=1) is for quick paste; this one
-/// is for editing the snippet library.
+/// Second hotkey: open the persistent Main Window (CRUD editor). The
+/// Selection Dialog (id=1) is for quick paste; this one is for editing
+/// the snippet library. The sequences themselves come from `Settings`.
 pub const OPEN_MAIN_WINDOW_ID: u32 = 2;
 
 /// The contract: register a key sequence globally and emit `id` when it fires.
@@ -790,6 +790,19 @@ impl ReaderState {
                 let state: u16 = u16::from(kp.state);
                 match match_registration(&self.registrations, kp.detail, state, &self.layout) {
                     Some(id) => {
+                        // Logged on the MATCH too, not only on the miss:
+                        // "the wrong action fired" is invisible otherwise,
+                        // because a wrong match is still a match. This one
+                        // line is what tells a user reporting "the
+                        // four-key combination runs the three-key action"
+                        // which registration actually claimed the event
+                        // and what modifier state arrived with it.
+                        tracing::debug!(
+                            "hotkey id={id} fired (keycode={}, state={:#x}, lock_mods={:#x})",
+                            kp.detail,
+                            state,
+                            self.layout.lock_mods,
+                        );
                         let _ = self.events.send(id);
                     }
                     None => {
@@ -1473,6 +1486,40 @@ mod tests {
                 parse_sequence(seq, &layout).unwrap_or_else(|| panic!("{seq} must parse"));
             let expected = name.parse::<KeyCode>().unwrap().0 as u8 + 8;
             assert_eq!(keycode, expected, "{seq}");
+        }
+    }
+
+    /// The sequences `HotkeySettings` ships as defaults must actually
+    /// parse. Nothing checked this before, so a default the platform
+    /// layer rejects would only surface as a warning at startup and a
+    /// silently inert shortcut — and the current defaults carry three
+    /// modifiers, which no other test exercises.
+    ///
+    /// Mirrors `fastpaste_app::settings::HotkeySettings`; that crate
+    /// depends on this one, so the strings are repeated rather than
+    /// imported.
+    #[test]
+    fn the_shipped_default_sequences_parse() {
+        let layout = test_layout();
+        let dialog = parse_sequence("Ctrl+Alt+V", &layout)
+            .expect("the default selection-dialog hotkey must parse");
+        let main = parse_sequence("Ctrl+Alt+M", &layout)
+            .expect("the default main-window hotkey must parse");
+
+        // The defaults differ by KEY, not by modifier. A pair separated
+        // only by Shift collapses wherever something normalises Shift
+        // away, and the two actions become one.
+        assert_ne!(dialog.0, main.0, "the defaults must differ by keycode");
+        assert_eq!(
+            dialog.1, main.1,
+            "…and share their modifiers, so neither can shadow the other"
+        );
+
+        // Whatever the lock state, neither grab can be mistaken for the
+        // other: the keycodes differ, so no combination of lock bits
+        // makes them equal.
+        for combo in layout.lock_combos() {
+            assert_ne!((dialog.0, dialog.1 | combo), (main.0, main.1 | combo));
         }
     }
 

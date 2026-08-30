@@ -76,11 +76,29 @@ pub struct HotkeySettings {
 }
 
 impl HotkeySettings {
+    // Ctrl+U was the original default and was a poor choice twice over:
+    // it is View Source in Chrome and Firefox, and it is the line-kill
+    // in every readline-based shell. A global shortcut takes the key
+    // away from every application that wanted it, so a default has to be
+    // one nobody else is using. Ctrl+Alt+V keeps the paste mnemonic and
+    // is the conventional slot for clipboard history on KDE.
+    //
+    // The two defaults deliberately differ by the KEY, not by Shift.
+    // A pair that differs only by a modifier is fragile: Alt+Shift is
+    // the layout switcher on many setups, a compositor can claim the
+    // longer combination before it reaches us, and anything that
+    // normalises Shift away collapses the two into one — reported in
+    // practice as "the four-key combination triggers the three-key
+    // action". Different keys cannot collapse.
+    //
+    // Existing installations are unaffected: a `config.toml` that names
+    // its hotkeys explicitly keeps those values, since these defaults
+    // only fill in fields that are absent.
     fn default_open_dialog() -> String {
-        "Ctrl+U".to_string()
+        "Ctrl+Alt+V".to_string()
     }
     fn default_open_main_window() -> String {
-        "Ctrl+Shift+U".to_string()
+        "Ctrl+Alt+M".to_string()
     }
 }
 
@@ -300,8 +318,8 @@ mod tests {
         assert_eq!(s.general.language, "system");
 
         // hotkeys
-        assert_eq!(s.hotkeys.open_dialog, "Ctrl+U");
-        assert_eq!(s.hotkeys.open_main_window, "Ctrl+Shift+U");
+        assert_eq!(s.hotkeys.open_dialog, "Ctrl+Alt+V");
+        assert_eq!(s.hotkeys.open_main_window, "Ctrl+Alt+M");
 
         // clipboard history
         assert!(s.clipboard_history.enabled, "`enabled` must default true");

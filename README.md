@@ -1,9 +1,21 @@
 # fastpaste-rs
 
 Clipboard history + snippet manager for Linux, written in Rust.
-Targets Wayland (KDE Plasma 6 / KWin).
-Global hotkeys are grabbed via XGrabKey on XWayland, so the session must have XWayland available. 
-X11 sessions are not supported.
+Targets Wayland (KDE Plasma 6 / KWin). X11 sessions are not supported.
+
+> **Known limitation — the global hotkeys are not truly global.**
+> They are grabbed with `XGrabKey` on the XWayland root window, and
+> under a Wayland compositor keyboard input only reaches XWayland while
+> an X11/XWayland window has focus. With a Wayland-native window focused
+> the keystroke never reaches us and goes to that application instead.
+>
+> On a current Plasma 6 desktop most applications are Wayland-native
+> (Chrome and Chromium run that way whenever `--ozone-platform=wayland`
+> is in effect), so in practice the shortcuts fire rarely. Making them
+> work everywhere needs a different mechanism — the
+> `org.freedesktop.portal.GlobalShortcuts` portal, or delegating the
+> shortcut to KDE and giving the app an IPC entry point. Until then, the
+> tray icon and the main window are the reliable ways in.
 
 ## Features
 
@@ -18,11 +30,14 @@ X11 sessions are not supported.
 - Options dialog: general / hotkeys / clipboard-history / paste settings,
   applied live (hotkey changes re-register immediately). A rejected
   hotkey is reported in the dialog and leaves the other changes intact
-- Global hotkeys (defaults, configurable): `Ctrl+U` → selection dialog,
-  `Ctrl+Shift+U` → main window; layout-independent physical-keycode grabs
-  that work under any keyboard layout. Letters, digits, `F1`-`F12`, and
-  named keys (`Space`, `Tab`, `Esc`, `Home`, arrows, punctuation…) are
-  accepted, with at least one modifier
+- Global hotkeys (defaults, configurable): `Ctrl+Alt+V` → selection
+  dialog, `Ctrl+Alt+M` → main window; layout-independent
+  physical-keycode grabs that work under any keyboard layout. Letters,
+  digits, `F1`-`F12`, and named keys (`Space`, `Tab`, `Esc`, `Home`,
+  arrows, punctuation…) are accepted, with at least one modifier.
+  See the limitation above for when they actually fire, and note that
+  KDE's own Klipper may already hold `Ctrl+Alt+V` — the options dialog
+  reports that case as "already claimed by another application"
 - Clipboard history folder: bounded ring populated by watching the system
   clipboard (wlr-data-control), rendered as a virtual folder in the tree
 - Paste via `/dev/uinput` Ctrl+V emulation, with the previous clipboard
@@ -38,7 +53,7 @@ The app starts and stays useful when a piece of the desktop is missing:
 | Missing | Effect |
 |---|---|
 | `/dev/uinput` | Paste puts the payload on the clipboard and leaves it there for a manual Ctrl+V; nothing else changes |
-| XWayland / X connection | Global hotkeys do not fire. The tray, main window and clipboard history all still work. A connection that drops later is reconnected automatically (up to 5 attempts, 500 ms apart), replaying the registered grabs; past that the hotkeys are inert until the app is restarted |
+| XWayland / X connection | Global hotkeys do not fire at all (as opposed to firing only over X11 windows — see the limitation at the top). The tray, main window and clipboard history all still work. A connection that drops later is reconnected automatically (up to 5 attempts, 500 ms apart), replaying the registered grabs; past that the hotkeys are inert until the app is restarted |
 | System tray | The app quits when the main window is closed, rather than staying resident with no way to reach it |
 | A readable `config.toml` | The unreadable file is moved to `config.toml.bak` and defaults are used, rather than failing to start |
 | A decodable database row | The row is skipped and logged; the rest of the library still loads |
@@ -175,6 +190,33 @@ Orchestrates data + platform into long-lived services:
   a hidden window would be freed and rebuilt on every reopen
 - `build.rs` — `slint_build` compilation of the `.slint` files
 
+## Choosing a shortcut
+
+The two defaults differ by the **key** (`V` / `M`), not by a modifier.
+That is deliberate. A pair that differs only by Shift is fragile: on many
+layouts `Alt+Shift` is the layout switcher, a compositor can claim the
+longer combination before it reaches the app, and anything that
+normalises Shift away collapses the two into one — which shows up as
+"the four-key combination triggers the three-key action". Two different
+keys cannot collapse that way.
+
+Note that KDE's own Klipper may already hold `Ctrl+Alt+V`. The options
+dialog reports that case as "already claimed by another application"
+rather than silently reverting the field.
+
+If a shortcut behaves unexpectedly, ask the app what it actually
+received:
+
+```
+RUST_LOG=fastpaste_platform=debug cargo run --bin fastpaste-gui
+```
+
+Every registration is logged with its resolved keycode and modifier
+mask, and every fire is logged with the id that claimed it plus the raw
+modifier state that arrived. If the state that arrives does not match
+the mask that was registered, the compositor or the keymap changed it on
+the way.
+
 ## Data & configuration
 
 | What | Path |
@@ -191,8 +233,8 @@ keeps loading after upgrades:
 language = "system"          # "system" follows the OS locale; or a BCP-47 tag
 
 [hotkeys]
-open_dialog = "Ctrl+U"
-open_main_window = "Ctrl+Shift+U"
+open_dialog = "Ctrl+Alt+V"
+open_main_window = "Ctrl+Alt+M"
 
 [clipboard_history]
 enabled = true

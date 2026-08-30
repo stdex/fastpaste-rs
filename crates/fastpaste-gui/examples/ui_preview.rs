@@ -110,7 +110,7 @@ fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
     t.set_options_open_dialog_label("Открыть диалог выбора:".into());
     t.set_options_open_main_window_label("Открыть главное окно:".into());
     t.set_options_hotkeys_hint(
-        "Модификаторы: Ctrl, Alt, Shift, Super. Объединяются через «+». Пример: Ctrl+U".into(),
+        "Модификаторы: Ctrl, Alt, Shift, Super. Объединяются через «+». Пример: Ctrl+Alt+V".into(),
     );
     t.set_options_capture_history("Отслеживать изменения буфера обмена".into());
     t.set_options_max_items_label("Макс. элементов:".into());
@@ -126,8 +126,8 @@ fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
     t.set_options_apply("Применить".into());
 
     d.set_language_index(2);
-    d.set_hotkey_open_dialog("Ctrl+U".into());
-    d.set_hotkey_open_main_window("Ctrl+Shift+U".into());
+    d.set_hotkey_open_dialog("Ctrl+Alt+V".into());
+    d.set_hotkey_open_main_window("Ctrl+Alt+M".into());
     d.set_history_enabled(true);
     d.set_history_max_items(10);
     d.set_history_max_items_min(1);
