@@ -180,21 +180,6 @@ fn build_main_with(confirm: bool) -> Result<MainWindow, slint::PlatformError> {
     use slint_tree_view::TreeItem;
     let w = MainWindow::new()?;
 
-    // Mirror the palette the app installs in `build_main_window`. Without
-    // it the preview renders the TreeView's stock style, so it would be
-    // showing something the user never sees — which makes it useless for
-    // exactly the question it exists to answer.
-    {
-        use slint::Global;
-        let rgb = slint::Color::from_rgb_u8;
-        let style = slint_tree_view::TreeViewStyle::get(&w);
-        style.set_background_color(rgb(0xff, 0xff, 0xff));
-        style.set_text_color(rgb(0x21, 0x25, 0x29));
-        style.set_highlight_color(rgb(0xdb, 0xea, 0xfe));
-        style.set_highlighted_text_color(rgb(0xff, 0xff, 0xff));
-        style.set_hover_color(rgb(0xe9, 0xec, 0xef));
-        style.set_branch_indicator_color(rgb(0x6a, 0x73, 0x7d));
-    }
     let t = Translations::get(&w);
     t.set_toolbar_add_folder("📁 Папка".into());
     t.set_toolbar_add_snippet("📄 Фрагмент".into());

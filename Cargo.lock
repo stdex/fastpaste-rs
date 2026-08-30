@@ -3855,7 +3855,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5013,9 +5013,9 @@ dependencies = [
 
 [[package]]
 name = "slint-tree-view"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10df8e31d1a7649e9e144ca03294b9ab168048341b8f3b3c13227a4cb08f0a97"
+checksum = "f4d06d869ee1e70343c983a1d21f235d83a475fc6f28db3a0fbfd0aeddc8566c"
 dependencies = [
  "slint",
  "slint-build",

@@ -151,6 +151,21 @@ export component MainWindow inherits Window {
                 preferred-width: 320px;
                 min-width: 220px;
                 horizontal-stretch: 0;
+
+                // Theming, set on the instance (slint-tree-view >= 0.3).
+                // This used to be a Rust-side hook that assigned the
+                // library's `TreeViewStyle` global — which silently did
+                // nothing, because a library module keeps its own globals
+                // table and the consumer reaches a different one. Setting
+                // it here works, and it can read `Theme` directly instead
+                // of repeating hex literals in Rust.
+                background-color: Theme.surface;
+                text-color: Theme.text;
+                highlight-color: Theme.selection-bg;
+                highlighted-text-color: Theme.selection-fg;
+                hover-color: Theme.hover-bg;
+                branch-indicator-color: Theme.text-muted;
+
                 model: root.tree-model;
                 // TWO-WAY (`<=>`), never `:`. The TreeView assigns its own
                 // `current-index` on a row click and in set-current /

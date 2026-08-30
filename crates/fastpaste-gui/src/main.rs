@@ -643,50 +643,6 @@ fn build_main_window(ctx: Arc<AppContext>) -> Option<MainWindow> {
     // Ensure the UI language is current even in the headless no-tray path.
     apply_translations(&win, &i18n());
 
-    // Tree palette hook-in. TreeViewStyle is a per-compilation singleton
-    // global; Slint 1.17 has no in-.slint way to assign global properties,
-    // so this is the documented Rust-side hook (one tree in the app → no
-    // per-instance conflicts). Colors only: the dimension setters take a
-    // raw Coord (physical px) and at HiDPI scale factors blanked the
-    // ListView in testing, so row-height/indentation keep their 28px/20px
-    // defaults — compact enough next to the 28px toolbar controls.
-    {
-        use slint::Global;
-        let rgb = slint::Color::from_rgb_u8;
-        let style = slint_tree_view::TreeViewStyle::get(&win);
-        // These mirror the `Theme` tokens in widgets.slint (Slint 1.17
-        // offers no way to read a global from another compilation unit,
-        // so they are repeated here rather than shared).
-        //
-        // The selection was a saturated accent fill with white text,
-        // which made the tree the loudest thing on screen and disagreed
-        // with the selection styling everywhere else in the app.
-        // These mirror the `Theme` tokens in widgets.slint (Slint 1.17
-        // offers no way to read a global from another compilation unit,
-        // so they are repeated here rather than shared).
-        //
-        // CAVEAT, measured rather than assumed: not all of these take
-        // effect. `slint-tree-view` is compiled as a separate Slint
-        // library module, and only the properties it reads for *text*
-        // are honoured from here — `background-color` and
-        // `highlight-color`, both read in a `background:` binding, are
-        // silently ignored and the widget keeps the fluent style's
-        // white-ish backdrop and saturated-blue selection.
-        //
-        // So `highlighted-text-color` must stay WHITE: it is applied,
-        // while the light selection background that would justify dark
-        // text is not. Setting the pair to the app's own selection
-        // tokens produced dark blue on saturated blue — unreadable.
-        // Verified with examples/ui_preview: setting each colour to a
-        // loud value and sampling the rendered pixels.
-        style.set_background_color(rgb(0xff, 0xff, 0xff)); // ignored, see above
-        style.set_text_color(rgb(0x21, 0x25, 0x29)); // Theme.text — applied
-        style.set_highlight_color(rgb(0xdb, 0xea, 0xfe)); // ignored, see above
-        style.set_highlighted_text_color(rgb(0xff, 0xff, 0xff)); // must pair with the fluent blue
-        style.set_hover_color(rgb(0xe9, 0xec, 0xef)); // Theme.hover-bg
-        style.set_branch_indicator_color(rgb(0x6a, 0x73, 0x7d)); // Theme.text-muted
-    }
-
     // ---- Add Folder — inside selected folder, or top-level ----------------
     {
         let ctx_clone = ctx.clone();

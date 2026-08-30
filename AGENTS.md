@@ -187,18 +187,25 @@ real two-way link (`link_two_way` vs `set_property_binding`), how many
 `SharedGlobals::new` calls exist, whether a `changed` handler compiled
 to a `ChangeTracker`. It is generated, enormous, and searchable.
 
-### `slint-tree-view` ignores two of the six colours
+### A library module keeps its own globals
 
-Measured, not assumed: `background-color` and `highlight-color` set from
-Rust have **no effect** — both are read in `background:` bindings — while
-the text colours are honoured. The app has set all six since the initial
-commit and two never did anything.
+`slint-tree-view` ships its `.slint` as a Slint **library module**, and a
+library module has its own globals table. So
+`TreeViewStyle::get(&main_window)` from Rust reaches *our* table, not the
+one the widget reads — the setters return successfully and change
+nothing. A global also cannot be re-opened from a consumer `.slint`;
+that is a parse error, not an override.
 
-The practical consequence is a trap: changing the selection to the app's
-palette applies the dark text but not the light background, giving dark
-blue on saturated blue. `highlighted-text-color` is deliberately white
-to pair with the fluent blue that actually renders. Do not "fix" it
-without re-measuring.
+The tree is therefore themed **on the instance**, in
+`main_window.slint`, where it can read our `Theme` global directly
+(`highlight-color: Theme.selection-bg;`). This needs
+`slint-tree-view >= 0.3`, which added the per-instance properties for
+exactly this reason.
+
+The general lesson outlives this one crate: **a "global" from a
+dependency compiled as a library module is not reachable from here.** If
+setting one appears to do nothing, that is why — and the failure is
+silent, so it will not look like an error.
 
 ---
 
