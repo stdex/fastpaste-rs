@@ -52,3 +52,4 @@ selection-filter-placeholder = Zum Filtern tippen
 selection-empty = Noch keine Schnipsel.
 selection-tag-history = Verlauf
 selection-hint = ↑↓ auswählen · Enter einfügen · Esc schließen
+selection-section-snippets = Schnipsel

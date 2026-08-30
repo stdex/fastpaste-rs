@@ -52,3 +52,4 @@ selection-filter-placeholder = Escribe para filtrar
 selection-empty = Aún no hay fragmentos.
 selection-tag-history = Historial
 selection-hint = ↑↓ seleccionar · Enter pegar · Esc cerrar
+selection-section-snippets = Fragmentos

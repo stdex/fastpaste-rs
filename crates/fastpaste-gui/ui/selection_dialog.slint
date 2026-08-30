@@ -30,6 +30,11 @@ export struct SnippetRow {
     /// status"): 23 characters of identical prefix on every row, pushing
     /// the part the user is actually reading off the right edge.
     tag: string,
+    /// A non-selectable group heading rather than a pasteable row.
+    ///
+    /// Rust emits one before each group when more than one group is on
+    /// screen, so a lone group never carries a pointless heading.
+    is-header: bool,
 }
 
 export component SelectionDialog inherits Window {
@@ -57,6 +62,8 @@ export component SelectionDialog inherits Window {
 
     // Height of one row, used to scroll the selection into view.
     property <length> row-height: 42px;
+    // Group headings are shorter than rows.
+    property <length> header-height: 26px;
 
     // Rows per PageUp/PageDown — a screenful, so it still matches after
     // the window is resized.
@@ -68,13 +75,25 @@ export component SelectionDialog inherits Window {
     // on screen. Wrapping matters for a short keyboard-driven list: with
     // 3 snippets, Up from the first should reach the last rather than do
     // nothing.
+    // Wrapping index arithmetic, factored out so the header-skipping
+    // below can apply it twice.
+    pure function wrapped(i: int, delta: int) -> int {
+        Math.mod(i + delta + root.snippets.length, root.snippets.length)
+    }
+
     function move-selection(delta: int) {
         if (root.snippets.length == 0) {
             return;
         }
-        root.selected-index =
-            Math.mod(root.selected-index + delta + root.snippets.length,
-                     root.snippets.length);
+        let target = root.wrapped(root.selected-index, delta);
+        // Step over a group heading. One extra step is always enough:
+        // a heading is only emitted for a non-empty group, so two
+        // headings can never be adjacent. (Slint has no `while`, which
+        // is also why the TreeView component delegates this to its host
+        // — the same limitation, solved here by bounding the problem.)
+        root.selected-index = root.snippets[target].is-header
+            ? root.wrapped(target, delta)
+            : target;
         root.scroll-into-view();
     }
 
@@ -85,15 +104,24 @@ export component SelectionDialog inherits Window {
     // — the highlighted row off-screen, which is the symptom the
     // scroll-into-view work existed to remove.
     public function reset-view() {
-        root.selected-index = 0;
+        // Land on the first pasteable row: with both groups on screen
+        // index 0 is a group heading.
+        root.selected-index =
+            root.snippets.length > 0 && root.snippets[0].is-header ? 1 : 0;
         list.viewport-y = 0;
     }
 
-    function set-selection(i: int) {
+    // Home/End. `delta` says which way to step off a heading: forward
+    // for Home (the first row may be one), backward for End (the last
+    // row never is, since a heading always precedes its group).
+    function set-selection(i: int, delta: int) {
         if (root.snippets.length == 0) {
             return;
         }
-        root.selected-index = Math.max(0, Math.min(root.snippets.length - 1, i));
+        let target = Math.max(0, Math.min(root.snippets.length - 1, i));
+        root.selected-index = root.snippets[target].is-header
+            ? root.wrapped(target, delta)
+            : target;
         root.scroll-into-view();
     }
 
@@ -174,15 +202,16 @@ export component SelectionDialog inherits Window {
                             return accept;
                         }
                         if (event.text == Key.Home && self.text == "") {
-                            root.set-selection(0);
+                            root.set-selection(0, 1);
                             return accept;
                         }
                         if (event.text == Key.End && self.text == "") {
-                            root.set-selection(root.snippets.length - 1);
+                            root.set-selection(root.snippets.length - 1, -1);
                             return accept;
                         }
                         if (event.text == Key.Return) {
-                            if (root.snippets.length > 0) {
+                            if (root.snippets.length > 0
+                                && root.snippets[root.selected-index].is-header == false) {
                                 root.paste-selected(root.selected-index);
                             }
                             return accept;
@@ -226,15 +255,44 @@ export component SelectionDialog inherits Window {
                 height: 100%;
 
                 for snippet[i] in root.snippets: Rectangle {
-                    height: root.row-height;
-                    background: i == root.selected-index
-                        ? Theme.selection-bg
-                        : touch.has-hover ? Theme.hover-bg : transparent;
+                    height: snippet.is-header ? root.header-height : root.row-height;
+                    background: snippet.is-header
+                        ? transparent
+                        : (i == root.selected-index
+                            ? Theme.selection-bg
+                            : touch.has-hover ? Theme.hover-bg : transparent);
+
+                    // ---- Group heading -----------------------------
+                    if snippet.is-header: HorizontalLayout {
+                        padding-left: 12px;
+                        padding-right: 10px;
+                        spacing: Theme.spacing-s;
+
+                        Text {
+                            text: snippet.title;
+                            vertical-alignment: bottom;
+                            font-size: Theme.font-size-s;
+                            font-weight: 600;
+                            color: Theme.text-muted;
+                            horizontal-stretch: 0;
+                        }
+                        // Rule filling the rest of the line, so a
+                        // heading reads as a divider rather than as
+                        // another row of the list.
+                        Rectangle {
+                            horizontal-stretch: 1;
+                            Rectangle {
+                                y: parent.height / 2;
+                                height: 1px;
+                                background: Theme.border;
+                            }
+                        }
+                    }
 
                     // Accent bar on the selected row, matching the
                     // options sidebar. A fill alone is easy to lose track
                     // of while arrowing quickly through a long list.
-                    Rectangle {
+                    if snippet.is-header == false: Rectangle {
                         x: 0;
                         y: 6px;
                         width: 3px;
@@ -244,7 +302,7 @@ export component SelectionDialog inherits Window {
                             ? Theme.accent : transparent;
                     }
 
-                    VerticalLayout {
+                    if snippet.is-header == false: VerticalLayout {
                         padding: Theme.spacing-s;
                         padding-left: 12px;
                         padding-right: 10px;
@@ -284,7 +342,9 @@ export component SelectionDialog inherits Window {
                         }
                     }
 
+                    // Headings are not click targets.
                     touch := TouchArea {
+                        enabled: snippet.is-header == false;
                         clicked => {
                             root.selected-index = i;
                         }

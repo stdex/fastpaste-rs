@@ -59,3 +59,4 @@ selection-filter-placeholder = Type to filter
 selection-empty = No snippets yet.
 selection-tag-history = History
 selection-hint = ↑↓ select · Enter paste · Esc close
+selection-section-snippets = Snippets

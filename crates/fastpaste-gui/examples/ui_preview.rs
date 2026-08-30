@@ -144,29 +144,29 @@ fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
 fn build_selection() -> Result<SelectionDialog, slint::PlatformError> {
     let d = SelectionDialog::new()?;
     let rows: Vec<SnippetRow> = [
-        ("git status --short", "", "История"),
-        ("cargo test --workspace", "", "История"),
-        ("Адрес электронной почты", "user@example.com", ""),
-        ("Подпись", "С уважением, команда fastpaste", ""),
+        ("Фрагменты", "", "", true),
+        ("Адрес электронной почты", "user@example.com", "", false),
+        ("Подпись", "С уважением, команда fastpaste", "", false),
         (
             "SQL: выборка",
             "SELECT id, title FROM items ORDER BY order_index;",
             "",
+            false,
         ),
-        (
-            "Лицензия MIT",
-            "Permission is hereby granted, free of charge, to any person",
-            "",
-        ),
+        ("История буфера обмена", "", "", true),
+        ("git status --short", "", "История", false),
+        ("cargo test --workspace", "", "История", false),
     ]
     .iter()
-    .map(|(t, b, tag)| SnippetRow {
+    .map(|(t, b, tag, hdr)| SnippetRow {
         title: (*t).into(),
         body: (*b).into(),
         tag: (*tag).into(),
+        is_header: *hdr,
     })
     .collect();
     d.set_snippets(slint::ModelRc::new(slint::VecModel::from(rows)));
+    d.set_selected_index(1);
     let t = Translations::get(&d);
     t.set_selection_dialog_title("Выберите строку для вставки".into());
     t.set_selection_filter_placeholder("Введите для фильтрации".into());

@@ -52,3 +52,4 @@ selection-filter-placeholder = 输入以筛选
 selection-empty = 还没有片段。
 selection-tag-history = 历史
 selection-hint = ↑↓ 选择 · Enter 粘贴 · Esc 关闭
+selection-section-snippets = 片段

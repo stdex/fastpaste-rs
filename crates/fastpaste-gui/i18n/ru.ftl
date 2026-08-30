@@ -53,3 +53,4 @@ selection-filter-placeholder = Введите для фильтрации
 selection-empty = Пока нет фрагментов.
 selection-tag-history = История
 selection-hint = ↑↓ выбрать · Enter вставить · Esc закрыть
+selection-section-snippets = Фрагменты

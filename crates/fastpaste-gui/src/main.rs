@@ -1261,7 +1261,21 @@ struct PasteCandidate {
     preview: String,
     /// Short right-aligned type marker; empty for saved snippets.
     tag: String,
+    /// A group heading rather than something pasteable.
+    is_header: bool,
     text: String,
+}
+
+impl PasteCandidate {
+    fn header(title: String) -> Self {
+        Self {
+            title,
+            preview: String::new(),
+            tag: String::new(),
+            is_header: true,
+            text: String::new(),
+        }
+    }
 }
 
 /// Everything the selection dialog can paste: the clipboard history
@@ -1278,46 +1292,83 @@ fn paste_candidates(ctx: &AppContext, filter: &str) -> Vec<PasteCandidate> {
     // history row, and pasting it in front of each one pushed the part
     // the user is reading toward the right edge.
     let history_tag = i18n().msg("selection-tag-history");
-    let mut out: Vec<PasteCandidate> = ctx
-        .clipboard_history
-        .entries()
-        .into_iter()
-        .filter(|e| !e.text.is_empty())
-        .map(|e| PasteCandidate {
-            title: tree_builder::collapse_newlines(&e.text),
-            preview: String::new(),
-            tag: history_tag.clone(),
-            text: e.text,
-        })
-        .collect();
+    let needle = filter.trim().to_lowercase();
+    let matches = |title: &str, text: &str| {
+        needle.is_empty()
+            || title.to_lowercase().contains(&needle)
+            || text.to_lowercase().contains(&needle)
+    };
 
-    let snippets = with_db(ctx, |db| {
+    // Saved snippets first: they are the deliberate, named content, and
+    // the dialog opens with the selection on the first row.
+    let snippets: Vec<PasteCandidate> = with_db(ctx, |db| {
         db.load_all_lenient().unwrap_or_else(|e| {
             tracing::error!("load_all failed for dialog: {e}");
             (Vec::new(), 0)
         })
     })
     .map(|(items, _)| items)
-    .unwrap_or_default();
-    out.extend(
-        snippets
-            .into_iter()
-            .filter(|i: &Item| i.kind == ItemKind::Plain)
-            .map(|i| PasteCandidate {
-                title: i.title,
-                preview: tree_builder::collapse_newlines(&i.body_plain),
-                tag: String::new(),
-                text: i.body_plain,
-            }),
-    );
+    .unwrap_or_default()
+    .into_iter()
+    .filter(|i: &Item| i.kind == ItemKind::Plain)
+    .filter(|i| matches(&i.title, &i.body_plain))
+    .map(|i| PasteCandidate {
+        title: i.title,
+        preview: tree_builder::collapse_newlines(&i.body_plain),
+        tag: String::new(),
+        is_header: false,
+        text: i.body_plain,
+    })
+    .collect();
 
-    let needle = filter.trim().to_lowercase();
-    if needle.is_empty() {
-        return out;
+    // Clipboard history last.
+    let history: Vec<PasteCandidate> = ctx
+        .clipboard_history
+        .entries()
+        .into_iter()
+        .filter(|e| !e.text.is_empty())
+        .filter(|e| matches("", &e.text))
+        .map(|e| PasteCandidate {
+            title: tree_builder::collapse_newlines(&e.text),
+            preview: String::new(),
+            tag: history_tag.clone(),
+            is_header: false,
+            text: e.text,
+        })
+        .collect();
+
+    let t = i18n();
+    group_candidates(
+        snippets,
+        history,
+        || t.msg("selection-section-snippets"),
+        || t.msg("clipboard-history-folder"),
+    )
+}
+
+/// Concatenate the two groups, snippets first, inserting a heading
+/// before each one — but only when both are present.
+///
+/// A single group needs no label: the list is homogeneous, and a lone
+/// heading is chrome that says nothing. Split out from the database and
+/// clipboard reads above so the rule is testable; the labels arrive as
+/// closures so a test does not need a translator.
+fn group_candidates(
+    snippets: Vec<PasteCandidate>,
+    history: Vec<PasteCandidate>,
+    snippets_label: impl FnOnce() -> String,
+    history_label: impl FnOnce() -> String,
+) -> Vec<PasteCandidate> {
+    let both = !snippets.is_empty() && !history.is_empty();
+    let mut out = Vec::with_capacity(snippets.len() + history.len() + 2);
+    if both {
+        out.push(PasteCandidate::header(snippets_label()));
     }
-    out.retain(|c| {
-        c.title.to_lowercase().contains(&needle) || c.text.to_lowercase().contains(&needle)
-    });
+    out.extend(snippets);
+    if both {
+        out.push(PasteCandidate::header(history_label()));
+    }
+    out.extend(history);
     out
 }
 
@@ -1332,12 +1383,14 @@ fn repopulate_selection_dialog(d: &SelectionDialog, ctx: &Arc<AppContext>) {
             title: c.title.as_str().into(),
             body: c.preview.as_str().into(),
             tag: c.tag.as_str().into(),
+            is_header: c.is_header,
         })
         .collect();
     d.set_snippets(slint::ModelRc::new(slint::VecModel::from(model_rows)));
     // Not `set_selected_index(0)`: a Rust-side set does not run the
     // dialog's `set-selection`, so the viewport would stay scrolled where
-    // it was with the selection off-screen.
+    // it was with the selection off-screen. `reset_view` also lands past
+    // a leading group heading rather than on it.
     d.invoke_reset_view();
 
     let ctx_paste = ctx.clone();
@@ -1346,6 +1399,7 @@ fn repopulate_selection_dialog(d: &SelectionDialog, ctx: &Arc<AppContext>) {
         let text = usize::try_from(idx)
             .ok()
             .and_then(|i| candidates.get(i))
+            .filter(|c| !c.is_header)
             .map(|c| c.text.clone());
 
         // Hide FIRST. The paste sequence's settle delay is the entire
@@ -1775,6 +1829,7 @@ where
     t.set_selection_filter_placeholder(m("selection-filter-placeholder").into());
     t.set_selection_empty(m("selection-empty").into());
     t.set_selection_tag_history(m("selection-tag-history").into());
+    t.set_selection_section_snippets(m("selection-section-snippets").into());
     t.set_selection_hint(m("selection-hint").into());
 
     t.set_clipboard_history_folder(m("clipboard-history-folder").into());
@@ -1951,6 +2006,88 @@ mod tests {
         // folder: it is still a folder, but reports no children.
         rows[1].has_children = false;
         assert_eq!(subtree_folder_ids(&rows, 1, -1), Some(vec![2]));
+    }
+
+    // ---- selection-dialog grouping --------------------------------------
+
+    fn cand(title: &str) -> PasteCandidate {
+        PasteCandidate {
+            title: title.into(),
+            preview: String::new(),
+            tag: String::new(),
+            is_header: false,
+            text: title.into(),
+        }
+    }
+
+    fn shape(rows: &[PasteCandidate]) -> Vec<(bool, &str)> {
+        rows.iter()
+            .map(|c| (c.is_header, c.title.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn snippets_come_first_and_history_last() {
+        let out = group_candidates(
+            vec![cand("snippet")],
+            vec![cand("clip")],
+            || "Snippets".into(),
+            || "History".into(),
+        );
+        assert_eq!(
+            shape(&out),
+            [
+                (true, "Snippets"),
+                (false, "snippet"),
+                (true, "History"),
+                (false, "clip"),
+            ]
+        );
+    }
+
+    /// A lone group is homogeneous, so a heading over it says nothing.
+    #[test]
+    fn a_single_group_gets_no_heading() {
+        let only_snippets = group_candidates(
+            vec![cand("a"), cand("b")],
+            vec![],
+            || "S".into(),
+            || "H".into(),
+        );
+        assert_eq!(shape(&only_snippets), [(false, "a"), (false, "b")]);
+
+        let only_history = group_candidates(vec![], vec![cand("x")], || "S".into(), || "H".into());
+        assert_eq!(shape(&only_history), [(false, "x")]);
+    }
+
+    #[test]
+    fn no_candidates_means_no_rows_at_all() {
+        let out = group_candidates(vec![], vec![], || "S".into(), || "H".into());
+        assert!(out.is_empty(), "an empty list must not carry headings");
+    }
+
+    /// The dialog steps over a heading with a single extra move, which is
+    /// only sound because two headings can never be adjacent.
+    #[test]
+    fn headings_are_never_adjacent() {
+        let out = group_candidates(
+            vec![cand("a")],
+            vec![cand("x"), cand("y")],
+            || "S".into(),
+            || "H".into(),
+        );
+        let headers: Vec<usize> = out
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.is_header)
+            .map(|(i, _)| i)
+            .collect();
+        for pair in headers.windows(2) {
+            assert!(pair[1] - pair[0] > 1, "headings at {pair:?} are adjacent");
+        }
+        // And a heading is never the last row — it always introduces
+        // something.
+        assert!(!out.last().unwrap().is_header);
     }
 
     // ---- lang_index_for_code --------------------------------------------
