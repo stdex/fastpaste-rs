@@ -1,29 +1,49 @@
-//! `/dev/uinput` virtual keyboard used to emit Ctrl+V on Wayland.
+//! Synthesising the paste keystroke.
+//!
+//! The trait is the seam; the backend is per-platform. Linux drives a
+//! `/dev/uinput` virtual keyboard (Wayland offers no way to inject a key
+//! into another client); Windows uses `SendInput`, which needs no device
+//! and no permissions.
 
-use std::sync::Mutex;
-use std::time::Duration;
-
-use evdev::uinput::VirtualDevice;
-use evdev::{AttributeSet, EventType, InputEvent, KeyCode};
 use thiserror::Error;
 
+#[cfg(target_os = "linux")]
+use std::sync::Mutex;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+
+#[cfg(target_os = "linux")]
+use evdev::uinput::VirtualDevice;
+#[cfg(target_os = "linux")]
+use evdev::{AttributeSet, EventType, InputEvent, KeyCode};
+
+#[cfg(target_os = "linux")]
 const EVENT_SPACING: Duration = Duration::from_millis(15);
 
 /// How long to wait after creating the virtual device before it can be
-/// used. See the call site in [`EvdevUinputCtrlV::new`].
+/// used. See the call site in [`EvdevPasteKeys::new`].
+#[cfg(target_os = "linux")]
 const DEVICE_SETTLE: Duration = Duration::from_millis(200);
 
 #[derive(Error, Debug)]
-pub enum UinputError {
-    #[error("could not open /dev/uinput: {0}")]
+pub enum PasteKeyError {
+    /// The backend could not be set up: `/dev/uinput` is missing or not
+    /// writable on Linux; on Windows this does not occur, since
+    /// `SendInput` needs no handle.
+    #[error("could not open the input device: {0}")]
     Open(#[source] std::io::Error),
     #[error("could not emit event: {0}")]
     Emit(#[source] std::io::Error),
     #[error("internal device lock poisoned")]
     Poisoned,
+    /// The OS accepted fewer events than were submitted — on Windows,
+    /// typically because a higher-integrity window has the foreground
+    /// and is blocking synthetic input (UIPI).
+    #[error("the system rejected the synthetic keystroke ({sent} of {expected} events accepted)")]
+    Rejected { sent: u32, expected: u32 },
 }
 
-pub trait UinputCtrlV: Send + Sync {
+pub trait PasteKeys: Send + Sync {
     /// Whether this is a real device backend rather than the no-op one.
     ///
     /// It says nothing about the device's current *health*: a device that
@@ -32,7 +52,7 @@ pub trait UinputCtrlV: Send + Sync {
     /// an `Err` from `send_ctrl_v` as "the keystroke did not happen", the
     /// same way they treat `available() == false`.
     fn available(&self) -> bool;
-    fn send_ctrl_v(&self) -> Result<(), UinputError>;
+    fn send_ctrl_v(&self) -> Result<(), PasteKeyError>;
 }
 
 /// The key transitions that make up one Ctrl+V, in order.
@@ -40,6 +60,7 @@ pub trait UinputCtrlV: Send + Sync {
 /// Split out from the emit loop purely so it can be asserted in a test —
 /// press/release ordering is the kind of thing that silently regresses
 /// into a stuck modifier, and `/dev/uinput` is unavailable in CI.
+#[cfg(target_os = "linux")]
 fn ctrl_v_frames() -> [(KeyCode, bool); 4] {
     [
         (KeyCode::KEY_LEFTCTRL, true),
@@ -49,14 +70,16 @@ fn ctrl_v_frames() -> [(KeyCode, bool); 4] {
     ]
 }
 
-pub struct EvdevUinputCtrlV {
+#[cfg(target_os = "linux")]
+pub struct EvdevPasteKeys {
     // VirtualDevice::emit takes &mut self, so we wrap in a Mutex. Send + Sync
     // hold because VirtualDevice itself is Send + Sync.
     device: Mutex<VirtualDevice>,
 }
 
-impl EvdevUinputCtrlV {
-    pub fn new() -> Result<Self, UinputError> {
+#[cfg(target_os = "linux")]
+impl EvdevPasteKeys {
+    pub fn new() -> Result<Self, PasteKeyError> {
         // Only the keys `send_ctrl_v` ever emits. A narrower capability set
         // keeps the device report small and avoids the huge keymaps some
         // compositors handle poorly.
@@ -64,12 +87,12 @@ impl EvdevUinputCtrlV {
         keys.insert(KeyCode::KEY_LEFTCTRL);
         keys.insert(KeyCode::KEY_V);
         let device = VirtualDevice::builder()
-            .map_err(UinputError::Open)?
+            .map_err(PasteKeyError::Open)?
             .name("fastpaste virtual keyboard")
             .with_keys(&keys)
-            .map_err(UinputError::Open)?
+            .map_err(PasteKeyError::Open)?
             .build()
-            .map_err(UinputError::Open)?;
+            .map_err(PasteKeyError::Open)?;
         // Give the compositor/libinput time to notice the new device
         // before anyone emits through it. A keystroke sent into a device
         // the compositor has not finished enumerating is simply dropped,
@@ -81,16 +104,16 @@ impl EvdevUinputCtrlV {
         })
     }
 
-    fn emit_key(&self, key: KeyCode, press: bool) -> Result<(), UinputError> {
+    fn emit_key(&self, key: KeyCode, press: bool) -> Result<(), PasteKeyError> {
         // `VirtualDevice::emit` appends its own SYN_REPORT after the slice
         // it is given, so this must NOT include one — a manual sync here
         // produced a second, empty frame per key.
         let events = [InputEvent::new(EventType::KEY.0, key.0, i32::from(press))];
-        let mut dev = self.device.lock().map_err(|_| UinputError::Poisoned)?;
-        dev.emit(&events).map_err(UinputError::Emit)
+        let mut dev = self.device.lock().map_err(|_| PasteKeyError::Poisoned)?;
+        dev.emit(&events).map_err(PasteKeyError::Emit)
     }
 
-    fn press_ctrl_v(&self) -> Result<(), UinputError> {
+    fn press_ctrl_v(&self) -> Result<(), PasteKeyError> {
         let frames = ctrl_v_frames();
         for (i, (key, press)) in frames.iter().enumerate() {
             self.emit_key(*key, *press)?;
@@ -102,12 +125,13 @@ impl EvdevUinputCtrlV {
     }
 }
 
-impl UinputCtrlV for EvdevUinputCtrlV {
+#[cfg(target_os = "linux")]
+impl PasteKeys for EvdevPasteKeys {
     fn available(&self) -> bool {
         true
     }
 
-    fn send_ctrl_v(&self) -> Result<(), UinputError> {
+    fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
         let result = self.press_ctrl_v();
         if result.is_err() {
             // Never leave keys logically held on the virtual device — a
@@ -120,12 +144,108 @@ impl UinputCtrlV for EvdevUinputCtrlV {
     }
 }
 
-pub struct NullUinputCtrlV;
-impl UinputCtrlV for NullUinputCtrlV {
+// ---------------------------------------------------------------------------
+// Windows — SendInput
+// ---------------------------------------------------------------------------
+
+/// Synthesises Ctrl+V with `SendInput`.
+///
+/// Simpler than the Linux path in every way that matters: no device to
+/// create, no permissions to arrange, and no settle delay — the events
+/// are queued straight into the same input stream a real keyboard feeds,
+/// so they arrive in order and the compositor question does not exist.
+///
+/// `new()` cannot fail, but keeps the `Result` so the composition root
+/// treats both platforms identically.
+#[cfg(windows)]
+pub struct WindowsPasteKeys;
+
+#[cfg(windows)]
+impl WindowsPasteKeys {
+    pub fn new() -> Result<Self, PasteKeyError> {
+        Ok(Self)
+    }
+}
+
+#[cfg(windows)]
+impl Default for WindowsPasteKeys {
+    fn default() -> Self {
+        Self
+    }
+}
+
+#[cfg(windows)]
+impl PasteKeys for WindowsPasteKeys {
+    fn available(&self) -> bool {
+        true
+    }
+
+    fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
+            VK_CONTROL, VK_V,
+        };
+
+        fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: vk,
+                        wScan: 0,
+                        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            }
+        }
+
+        // One call, so the four events cannot be interleaved with real
+        // input from the user's keyboard. Ctrl brackets V, and every
+        // press has its release — a stuck Ctrl is the nastiest failure
+        // this module can produce.
+        let inputs = [
+            key(VK_CONTROL, false),
+            key(VK_V, false),
+            key(VK_V, true),
+            key(VK_CONTROL, true),
+        ];
+
+        // SAFETY: `inputs` is a live, correctly-sized array of
+        // initialised `INPUT` values owned by this stack frame, and the
+        // size argument matches `INPUT`'s layout as the API requires.
+        let sent = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<INPUT>() as i32,
+            )
+        };
+
+        if sent as usize != inputs.len() {
+            // Blocked partway — most often UIPI: a window running at a
+            // higher integrity level has the foreground and the OS
+            // refuses synthetic input to it. Release the modifier so the
+            // user is not left with a stuck Ctrl.
+            let release = [key(VK_CONTROL, true)];
+            // SAFETY: as above.
+            unsafe { SendInput(1, release.as_ptr(), size_of::<INPUT>() as i32) };
+            return Err(PasteKeyError::Rejected {
+                sent,
+                expected: inputs.len() as u32,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub struct NullPasteKeys;
+impl PasteKeys for NullPasteKeys {
     fn available(&self) -> bool {
         false
     }
-    fn send_ctrl_v(&self) -> Result<(), UinputError> {
+    fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
         Ok(())
     }
 }
@@ -136,7 +256,7 @@ mod tests {
 
     #[test]
     fn null_reports_unavailable_and_no_ops() {
-        let n = NullUinputCtrlV;
+        let n = NullPasteKeys;
         assert!(!n.available());
         n.send_ctrl_v().unwrap(); // does nothing, but doesn't error
     }

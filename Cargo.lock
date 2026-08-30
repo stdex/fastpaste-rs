@@ -1446,6 +1446,7 @@ dependencies = [
  "libc",
  "thiserror 2.0.19",
  "tracing",
+ "windows-sys 0.59.0",
  "wl-clipboard-watch",
  "x11rb",
 ]

@@ -1,14 +1,45 @@
-//! fastpaste platform layer: Wayland integration.
+//! fastpaste platform layer: everything that touches the OS or the
+//! desktop environment.
+//!
+//! One codebase, several platforms. The three OS concerns — global
+//! hotkeys, the clipboard, and synthesising the paste keystroke — each
+//! sit behind a trait, and this module re-exports **one** implementation
+//! of each under a platform-neutral alias:
+//!
+//! | Alias | Linux | Windows |
+//! |---|---|---|
+//! | [`SystemHotkeys`] | `XGrabKey` on XWayland | `RegisterHotKey` |
+//! | [`SystemClipboard`] | arboard + `wl-clipboard-watch` | arboard + `WM_CLIPBOARDUPDATE` |
+//! | [`SystemPasteKeys`] | `/dev/uinput` | `SendInput` |
+//!
+//! Layers above pick the alias, never the concrete type, so nothing
+//! outside this crate needs a `cfg`. Adding a platform means adding an
+//! implementation here and one row to that table — not a fork.
 
 pub mod clipboard;
 pub mod hotkey;
+pub mod paste_keys;
 pub mod take_once;
-pub mod uinput;
 
-pub use clipboard::{ArboardClipboard, Clipboard, ClipboardError, ClipboardPayload, NullClipboard};
+pub use clipboard::{Clipboard, ClipboardError, ClipboardPayload, NullClipboard};
 pub use hotkey::{
     GlobalHotkey, HotkeyError, NullGlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID,
-    X11GlobalHotkey,
 };
+pub use paste_keys::{NullPasteKeys, PasteKeyError, PasteKeys};
 pub use take_once::TakeOnceChannel;
-pub use uinput::{EvdevUinputCtrlV, NullUinputCtrlV, UinputCtrlV, UinputError};
+
+// ---- Platform-neutral aliases -------------------------------------------
+
+#[cfg(target_os = "linux")]
+pub use clipboard::ArboardClipboard as SystemClipboard;
+#[cfg(target_os = "linux")]
+pub use hotkey::X11GlobalHotkey as SystemHotkeys;
+#[cfg(target_os = "linux")]
+pub use paste_keys::EvdevPasteKeys as SystemPasteKeys;
+
+#[cfg(windows)]
+pub use clipboard::WindowsClipboard as SystemClipboard;
+#[cfg(windows)]
+pub use hotkey::WindowsGlobalHotkey as SystemHotkeys;
+#[cfg(windows)]
+pub use paste_keys::WindowsPasteKeys as SystemPasteKeys;

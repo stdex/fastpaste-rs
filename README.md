@@ -1,9 +1,23 @@
 # fastpaste-rs
 
-Clipboard history + snippet manager for Linux, written in Rust.
-Targets Wayland (KDE Plasma 6 / KWin). X11 sessions are not supported.
+Clipboard history + snippet manager, written in Rust. One codebase,
+built for Linux (Wayland — KDE Plasma 6 / KWin; X11 sessions are not
+supported) and for Windows.
 
-> **Known limitation — the global hotkeys are not truly global.**
+Everything the OS is asked for sits behind three traits, and each
+platform supplies one implementation:
+
+| | Linux | Windows |
+|---|---|---|
+| Global hotkeys | `XGrabKey` on the XWayland root window | `RegisterHotKey` |
+| Clipboard changes | `wl-clipboard-watch`, arboard polling as fallback | `WM_CLIPBOARDUPDATE` |
+| Paste keystroke | `/dev/uinput` | `SendInput` |
+| Single instance | abstract unix socket | named mutex |
+
+Everything above `fastpaste-platform` is platform-independent; adding an
+OS means adding an implementation there, not a fork.
+
+> **Linux only — the global hotkeys are not truly global.**
 > They are grabbed with `XGrabKey` on the XWayland root window, and
 > under a Wayland compositor keyboard input only reaches XWayland while
 > an X11/XWayland window has focus. With a Wayland-native window focused
@@ -16,6 +30,9 @@ Targets Wayland (KDE Plasma 6 / KWin). X11 sessions are not supported.
 > `org.freedesktop.portal.GlobalShortcuts` portal, or delegating the
 > shortcut to KDE and giving the app an IPC entry point. Until then, the
 > tray icon and the main window are the reliable ways in.
+>
+> **Windows does not have this problem**: `RegisterHotKey` is honoured
+> whatever has focus.
 
 ## Screenshots
 

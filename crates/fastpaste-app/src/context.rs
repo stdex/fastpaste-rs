@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use fastpaste_data::Database;
 use fastpaste_platform::{
-    ArboardClipboard, Clipboard, EvdevUinputCtrlV, GlobalHotkey, NullGlobalHotkey, NullUinputCtrlV,
-    UinputCtrlV, X11GlobalHotkey,
+    Clipboard, GlobalHotkey, NullGlobalHotkey, NullPasteKeys, PasteKeys, SystemClipboard,
+    SystemHotkeys, SystemPasteKeys,
 };
 use single_instance::SingleInstance;
 
@@ -30,7 +30,7 @@ pub struct AppContext {
     pub db: Arc<Mutex<Database>>,
     pub paster: Arc<Paster>,
     pub clipboard: Arc<dyn Clipboard>,
-    pub uinput: Arc<dyn UinputCtrlV>,
+    pub uinput: Arc<dyn PasteKeys>,
     pub hotkey: Arc<dyn GlobalHotkey>,
     /// Active application settings, behind an `RwLock` so the Options
     /// dialog's Apply can swap the whole struct at runtime. Accessors
@@ -89,7 +89,7 @@ impl AppContext {
     pub fn new(
         db: Arc<Mutex<Database>>,
         clipboard: Arc<dyn Clipboard>,
-        uinput: Arc<dyn UinputCtrlV>,
+        uinput: Arc<dyn PasteKeys>,
         hotkey: Arc<dyn GlobalHotkey>,
         settings: Settings,
         single_instance: Option<SingleInstance>,
@@ -117,6 +117,39 @@ impl AppContext {
     }
 }
 
+/// Build the single-instance key for a data directory.
+///
+/// The path cannot go in verbatim. A Win32 named mutex may not contain a
+/// backslash — the character is reserved for the `Global\\`/`Local\\`
+/// namespace prefix — and every Windows data dir is full of them, so the
+/// obvious `format!("...{}", dir.display())` produces a name the OS
+/// rejects. Names are length-limited there too.
+///
+/// Replacing every non-alphanumeric character keeps the mapping distinct
+/// enough for this purpose: two directories can only collide if they
+/// differ solely in separators, which cannot happen for absolute paths
+/// on one machine.
+fn instance_key_for(data_dir: &std::path::Path) -> String {
+    let sanitised: String = data_dir
+        .display()
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    // Keep well inside the Windows limit while leaving the tail — the
+    // part that actually distinguishes users — intact.
+    const MAX: usize = 180;
+    let tail: String = if sanitised.chars().count() > MAX {
+        sanitised
+            .chars()
+            .skip(sanitised.chars().count() - MAX)
+            .collect()
+    } else {
+        sanitised
+    };
+    format!("fastpaste_instance_{tail}")
+}
+
 impl AppContext {
     /// Construct all services. DB is opened (or created) at
     /// `~/.local/share/fastpaste/fastpaste.sqlite`.
@@ -124,7 +157,7 @@ impl AppContext {
     /// Degradation policy, in the order the services are built:
     /// - another instance already running → error, and `main()` exits
     ///   before anything else is touched;
-    /// - `/dev/uinput` unavailable → [`NullUinputCtrlV`]; paste leaves the
+    /// - `/dev/uinput` unavailable → [`NullPasteKeys`]; paste leaves the
     ///   payload on the clipboard for a manual Ctrl+V;
     /// - no XWayland / X connection → [`NullGlobalHotkey`]; the tray, the
     ///   main window and clipboard history all still work, so killing
@@ -145,12 +178,12 @@ impl AppContext {
         // corrupted — but the ordering made that a property the next
         // migration could quietly break.
         //
-        // `single-instance` binds a Linux abstract unix socket (no file on
-        // disk; the kernel auto-releases the name when the process exits).
-        // The abstract namespace is shared across users of the same network
-        // namespace, so the key derives from the per-user data-dir path —
+        // `single-instance` uses a Linux abstract unix socket (no file on
+        // disk; the kernel auto-releases the name when the process exits)
+        // and a named mutex on Windows. Either namespace is shared across
+        // users, so the key derives from the per-user data-dir path and
         // each OS user gets their own slot.
-        let instance_key = format!("fastpaste-instance:{}", data_dir.display());
+        let instance_key = instance_key_for(&data_dir);
         let single_instance = SingleInstance::new(&instance_key).map_err(|e| {
             anyhow::anyhow!("failed to acquire single-instance key {instance_key}: {e}")
         })?;
@@ -169,18 +202,18 @@ impl AppContext {
         let db = Arc::new(Mutex::new(Database::open(&db_path, false)?));
 
         // ---- Platform services ---------------------------------------------
-        let clipboard = Arc::new(ArboardClipboard::new()?);
-        let uinput: Arc<dyn UinputCtrlV> = match EvdevUinputCtrlV::new() {
+        let clipboard = Arc::new(SystemClipboard::new()?);
+        let uinput: Arc<dyn PasteKeys> = match SystemPasteKeys::new() {
             Ok(u) => Arc::new(u),
             Err(e) => {
                 tracing::warn!(
                     "/dev/uinput unavailable ({e}); \
                      paste will leave payload on clipboard"
                 );
-                Arc::new(NullUinputCtrlV)
+                Arc::new(NullPasteKeys)
             }
         };
-        let hotkey: Arc<dyn GlobalHotkey> = match X11GlobalHotkey::new() {
+        let hotkey: Arc<dyn GlobalHotkey> = match SystemHotkeys::new() {
             Ok(h) => Arc::new(h),
             Err(e) => {
                 tracing::error!(
@@ -217,7 +250,7 @@ impl AppContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastpaste_platform::{NullClipboard, NullGlobalHotkey, NullUinputCtrlV};
+    use fastpaste_platform::{NullClipboard, NullGlobalHotkey, NullPasteKeys};
 
     fn ctx(settings: Settings) -> (tempfile::TempDir, AppContext) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -227,12 +260,46 @@ mod tests {
         let ctx = AppContext::new(
             db,
             Arc::new(NullClipboard::new()),
-            Arc::new(NullUinputCtrlV),
+            Arc::new(NullPasteKeys),
             Arc::new(NullGlobalHotkey::new()),
             settings,
             None,
         );
         (dir, ctx)
+    }
+
+    #[test]
+    fn the_instance_key_survives_a_windows_path() {
+        // A Win32 named mutex may not contain a backslash, and every
+        // Windows data dir is full of them.
+        let key = instance_key_for(std::path::Path::new(
+            r"C:\Users\Ada\AppData\Roaming\fastpaste\data",
+        ));
+        assert!(
+            !key.contains('\\'),
+            "a backslash makes the name invalid: {key}"
+        );
+        assert!(!key.contains(':'), "a colon is reserved too: {key}");
+        assert!(key.starts_with("fastpaste_instance_"));
+        assert!(key.len() < 200, "names are length-limited on Windows");
+    }
+
+    #[test]
+    fn different_data_dirs_get_different_keys() {
+        let a = instance_key_for(std::path::Path::new("/home/ada/.local/share/fastpaste"));
+        let b = instance_key_for(std::path::Path::new("/home/bob/.local/share/fastpaste"));
+        assert_ne!(a, b, "two users must not share one instance slot");
+    }
+
+    #[test]
+    fn a_very_long_path_keeps_its_distinguishing_tail() {
+        let deep = format!("/home/ada/{}/fastpaste", "x".repeat(400));
+        let key = instance_key_for(std::path::Path::new(&deep));
+        assert!(key.len() < 220);
+        assert!(
+            key.ends_with("fastpaste"),
+            "the tail identifies the dir: {key}"
+        );
     }
 
     #[test]
@@ -303,7 +370,7 @@ mod tests {
         let ctx = AppContext::new(
             db,
             clip.clone(),
-            Arc::new(NullUinputCtrlV),
+            Arc::new(NullPasteKeys),
             Arc::new(NullGlobalHotkey::new()),
             Settings::default(),
             None,

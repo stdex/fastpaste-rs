@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fastpaste_platform::{Clipboard, UinputCtrlV};
+use fastpaste_platform::{Clipboard, PasteKeys};
 
 use thiserror::Error;
 
@@ -14,12 +14,12 @@ pub enum PasteError {
     #[error("clipboard: {0}")]
     Clipboard(#[from] fastpaste_platform::ClipboardError),
     #[error("uinput: {0}")]
-    Uinput(#[from] fastpaste_platform::UinputError),
+    Uinput(#[from] fastpaste_platform::PasteKeyError),
 }
 
 pub struct Paster {
     clipboard: Arc<dyn Clipboard>,
-    uinput: Arc<dyn UinputCtrlV>,
+    uinput: Arc<dyn PasteKeys>,
     /// Interior-mutable so the Options dialog's Apply can retune the paste
     /// sequence at runtime (the Arc<Paster> is shared with UI threads).
     delay_ms: AtomicU64,
@@ -44,7 +44,7 @@ pub struct Paster {
 impl Paster {
     pub fn new(
         clipboard: Arc<dyn Clipboard>,
-        uinput: Arc<dyn UinputCtrlV>,
+        uinput: Arc<dyn PasteKeys>,
         delay_ms: u64,
         restore_clipboard: bool,
     ) -> Self {
@@ -174,7 +174,7 @@ mod tests {
     use fastpaste_platform::{Clipboard, ClipboardError, ClipboardPayload, NullClipboard};
     use std::sync::Mutex;
 
-    /// A UinputCtrlV impl that counts `send_ctrl_v` calls, and can be
+    /// A PasteKeys impl that counts `send_ctrl_v` calls, and can be
     /// told to fail the way a revoked or dead device does.
     struct CountingUinput {
         count: Mutex<u32>,
@@ -200,14 +200,14 @@ mod tests {
             *self.count.lock().unwrap()
         }
     }
-    impl UinputCtrlV for CountingUinput {
+    impl PasteKeys for CountingUinput {
         fn available(&self) -> bool {
             self.available
         }
-        fn send_ctrl_v(&self) -> Result<(), fastpaste_platform::UinputError> {
+        fn send_ctrl_v(&self) -> Result<(), fastpaste_platform::PasteKeyError> {
             *self.count.lock().unwrap() += 1;
             if self.fail {
-                return Err(fastpaste_platform::UinputError::Poisoned);
+                return Err(fastpaste_platform::PasteKeyError::Poisoned);
             }
             Ok(())
         }

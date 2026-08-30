@@ -5,14 +5,39 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+
+# Cross-platform clipboard read/write. The watcher is per-platform (see
+# the target sections below); arboard only covers get/set.
+arboard = "3.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
+# Native data-control reads/writes on Wayland, matching the transport the
+# watcher uses. Windows needs none of this.
 arboard = { version = "3.6", features = ["wayland-data-control"] }
 # Watching only. arboard's wayland-data-control feature already pulls
 # wl-clipboard-rs in for native reads/writes, but that crate has no watch
 # API in any published version (verified against docs.rs, 2026-08) — the
 # watch surface lives only in the separate wl-clipboard-rs-tools binary.
 wl-clipboard-watch = "0.1"
-libc = "0.2"   # poll(2) for the hotkey reader's blocking loop; no new lock entries (x11rb dep)
-thiserror.workspace = true
-tracing.workspace = true
+libc = "0.2"   # poll(2) for the hotkey reader's blocking loop
 x11rb = "0.13"
+
+[target.'cfg(windows)'.dependencies]
+# Win32 bindings: RegisterHotKey + a message pump for the hotkeys,
+# AddClipboardFormatListener for change notifications, SendInput for the
+# paste keystroke.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    # WNDCLASSW names GDI handle types, so registering a window class
+    # needs this even though nothing here draws.
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+

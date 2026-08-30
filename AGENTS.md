@@ -22,6 +22,41 @@ and `gui` imports the others.
 The layering is the design. If a fix wants to reach across it, that is
 usually the signal that it belongs in a different crate.
 
+## Platforms
+
+One codebase. Every OS call sits behind a trait in `fastpaste-platform`,
+which re-exports exactly one implementation of each under a neutral
+alias — `SystemHotkeys`, `SystemClipboard`, `SystemPasteKeys`. **Nothing
+above that crate contains a `cfg`**, and nothing outside it names a
+concrete backend. Keep it that way: a `cfg` leaking into `app` or `gui`
+is the first step toward two codebases.
+
+Backends live in submodules (`hotkey/x11.rs`, `hotkey/windows.rs`,
+`clipboard/wayland.rs`, `clipboard/windows.rs`) and the shared file
+above them holds only the trait, the error type and the null backend.
+
+Platform-specific dependencies belong in a target section of
+`Cargo.toml`, never the common one — `evdev`, `x11rb` and
+`wl-clipboard-watch` do not exist on Windows, and `arboard` needs its
+`wayland-data-control` feature only on Linux.
+
+### Checking the Windows build
+
+```
+rustup target add x86_64-pc-windows-gnu
+cargo check --target x86_64-pc-windows-gnu -p fastpaste-platform
+```
+
+That covers the crate where the platform code lives, and it is worth
+running for any change to it. The rest of the workspace **cannot** be
+checked this way without a C cross-compiler: `rusqlite`'s `bundled`
+feature builds SQLite from source, so `-p fastpaste-data` and anything
+downstream needs mingw (`x86_64-w64-mingw32-gcc`) installed.
+
+Nothing Windows can be *run* here at all. Treat Win32 code as
+type-checked and no more — the first real build on Windows is where its
+runtime behaviour gets tested for the first time.
+
 ## Everyday commands
 
 ```
