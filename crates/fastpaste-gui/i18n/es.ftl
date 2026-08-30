@@ -50,3 +50,5 @@ options-error-hotkey-invalid = No se pudo registrar ese atajo.
 options-error-save-failed = Ajustes aplicados en esta sesión, pero no se pudieron guardar en disco.
 selection-filter-placeholder = Escribe para filtrar
 selection-empty = Aún no hay fragmentos.
+selection-tag-history = Historial
+selection-hint = ↑↓ seleccionar · Enter pegar · Esc cerrar

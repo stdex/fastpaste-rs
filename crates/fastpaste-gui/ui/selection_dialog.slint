@@ -22,6 +22,14 @@ import { Theme } from "widgets.slint";
 export struct SnippetRow {
     title: string,
     body: string,
+    /// Short type marker shown right-aligned on the title line, e.g.
+    /// "История". Empty for saved snippets.
+    ///
+    /// This replaces the folder name that used to be pasted onto the
+    /// front of every history row's title ("История буфера обмена: git
+    /// status"): 23 characters of identical prefix on every row, pushing
+    /// the part the user is actually reading off the right edge.
+    tag: string,
 }
 
 export component SelectionDialog inherits Window {
@@ -223,21 +231,52 @@ export component SelectionDialog inherits Window {
                         ? Theme.selection-bg
                         : touch.has-hover ? Theme.hover-bg : transparent;
 
+                    // Accent bar on the selected row, matching the
+                    // options sidebar. A fill alone is easy to lose track
+                    // of while arrowing quickly through a long list.
+                    Rectangle {
+                        x: 0;
+                        y: 6px;
+                        width: 3px;
+                        height: parent.height - 12px;
+                        border-radius: 2px;
+                        background: i == root.selected-index
+                            ? Theme.accent : transparent;
+                    }
+
                     VerticalLayout {
                         padding: Theme.spacing-s;
-                        padding-left: 10px;
+                        padding-left: 12px;
                         padding-right: 10px;
-                        alignment: start;
+                        // Centred, not top-aligned: a clipboard-history
+                        // row has no second line (its title already IS
+                        // the text), and top-aligning left it floating
+                        // above an empty half-row.
+                        alignment: center;
 
-                        Text {
-                            text: snippet.title;
-                            font-size: Theme.font-size;
-                            font-weight: i == root.selected-index ? 600 : 400;
-                            color: i == root.selected-index
-                                ? Theme.selection-fg : Theme.text;
-                            overflow: elide;
+                        HorizontalLayout {
+                            spacing: Theme.spacing-s;
+
+                            Text {
+                                text: snippet.title;
+                                font-size: Theme.font-size;
+                                font-weight: i == root.selected-index ? 600 : 400;
+                                color: i == root.selected-index
+                                    ? Theme.selection-fg : Theme.text;
+                                overflow: elide;
+                                horizontal-stretch: 1;
+                            }
+                            // Type marker, right-aligned so it never
+                            // competes with the text for the left edge.
+                            if snippet.tag != "": Text {
+                                text: snippet.tag;
+                                font-size: Theme.font-size-s;
+                                color: Theme.text-muted;
+                                vertical-alignment: center;
+                                horizontal-stretch: 0;
+                            }
                         }
-                        Text {
+                        if snippet.body != "": Text {
                             text: snippet.body;
                             font-size: Theme.font-size-s;
                             color: Theme.text-muted;
@@ -254,6 +293,31 @@ export component SelectionDialog inherits Window {
                         }
                     }
                 }
+            }
+        }
+
+        // ── Keyboard hints ───────────────────────────────────────────
+        // The whole point of this dialog is that it is driven from the
+        // keyboard, and nothing on screen said so.
+        Rectangle {
+            height: 1px;
+            vertical-stretch: 0;
+            background: Theme.border;
+        }
+        Rectangle {
+            height: 26px;
+            vertical-stretch: 0;
+            background: Theme.window-bg;
+
+            Text {
+                x: 12px;
+                width: parent.width - 24px;
+                height: 100%;
+                text: Translations.selection-hint;
+                font-size: Theme.font-size-s;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+                overflow: elide;
             }
         }
     }

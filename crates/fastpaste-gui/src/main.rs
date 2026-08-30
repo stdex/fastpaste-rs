@@ -654,12 +654,37 @@ fn build_main_window(ctx: Arc<AppContext>) -> Option<MainWindow> {
         use slint::Global;
         let rgb = slint::Color::from_rgb_u8;
         let style = slint_tree_view::TreeViewStyle::get(&win);
-        style.set_background_color(rgb(0xff, 0xff, 0xff));
-        style.set_text_color(rgb(0x21, 0x25, 0x29));
-        style.set_highlight_color(rgb(0x25, 0x63, 0xeb));
-        style.set_highlighted_text_color(rgb(0xff, 0xff, 0xff));
-        style.set_hover_color(rgb(0xee, 0xf3, 0xfb));
-        style.set_branch_indicator_color(rgb(0x6a, 0x73, 0x7d));
+        // These mirror the `Theme` tokens in widgets.slint (Slint 1.17
+        // offers no way to read a global from another compilation unit,
+        // so they are repeated here rather than shared).
+        //
+        // The selection was a saturated accent fill with white text,
+        // which made the tree the loudest thing on screen and disagreed
+        // with the selection styling everywhere else in the app.
+        // These mirror the `Theme` tokens in widgets.slint (Slint 1.17
+        // offers no way to read a global from another compilation unit,
+        // so they are repeated here rather than shared).
+        //
+        // CAVEAT, measured rather than assumed: not all of these take
+        // effect. `slint-tree-view` is compiled as a separate Slint
+        // library module, and only the properties it reads for *text*
+        // are honoured from here — `background-color` and
+        // `highlight-color`, both read in a `background:` binding, are
+        // silently ignored and the widget keeps the fluent style's
+        // white-ish backdrop and saturated-blue selection.
+        //
+        // So `highlighted-text-color` must stay WHITE: it is applied,
+        // while the light selection background that would justify dark
+        // text is not. Setting the pair to the app's own selection
+        // tokens produced dark blue on saturated blue — unreadable.
+        // Verified with examples/ui_preview: setting each colour to a
+        // loud value and sampling the rendered pixels.
+        style.set_background_color(rgb(0xff, 0xff, 0xff)); // ignored, see above
+        style.set_text_color(rgb(0x21, 0x25, 0x29)); // Theme.text — applied
+        style.set_highlight_color(rgb(0xdb, 0xea, 0xfe)); // ignored, see above
+        style.set_highlighted_text_color(rgb(0xff, 0xff, 0xff)); // must pair with the fluent blue
+        style.set_hover_color(rgb(0xe9, 0xec, 0xef)); // Theme.hover-bg
+        style.set_branch_indicator_color(rgb(0x6a, 0x73, 0x7d)); // Theme.text-muted
     }
 
     // ---- Add Folder — inside selected folder, or top-level ----------------
@@ -1275,7 +1300,11 @@ fn show_dialog_and_paste(ctx: Arc<AppContext>) {
 /// One entry offered by the selection dialog.
 struct PasteCandidate {
     title: String,
+    /// Second line under the title. Empty for clipboard-history rows,
+    /// whose title already *is* the text.
     preview: String,
+    /// Short right-aligned type marker; empty for saved snippets.
+    tag: String,
     text: String,
 }
 
@@ -1288,18 +1317,20 @@ struct PasteCandidate {
 /// at in the tree and nothing else, even though the quick-paste popup is
 /// exactly where a user goes looking for it.
 fn paste_candidates(ctx: &AppContext, filter: &str) -> Vec<PasteCandidate> {
-    let history_label = i18n().msg("clipboard-history-folder");
+    // The row's type travels as a short tag rendered right-aligned, not
+    // as a prefix on the title: the folder name is identical on every
+    // history row, and pasting it in front of each one pushed the part
+    // the user is reading toward the right edge.
+    let history_tag = i18n().msg("selection-tag-history");
     let mut out: Vec<PasteCandidate> = ctx
         .clipboard_history
         .entries()
         .into_iter()
         .filter(|e| !e.text.is_empty())
         .map(|e| PasteCandidate {
-            title: format!(
-                "{history_label}: {}",
-                tree_builder::collapse_newlines(&e.text)
-            ),
-            preview: tree_builder::collapse_newlines(&e.text),
+            title: tree_builder::collapse_newlines(&e.text),
+            preview: String::new(),
+            tag: history_tag.clone(),
             text: e.text,
         })
         .collect();
@@ -1319,6 +1350,7 @@ fn paste_candidates(ctx: &AppContext, filter: &str) -> Vec<PasteCandidate> {
             .map(|i| PasteCandidate {
                 title: i.title,
                 preview: tree_builder::collapse_newlines(&i.body_plain),
+                tag: String::new(),
                 text: i.body_plain,
             }),
     );
@@ -1343,6 +1375,7 @@ fn repopulate_selection_dialog(d: &SelectionDialog, ctx: &Arc<AppContext>) {
         .map(|c| SnippetRow {
             title: c.title.as_str().into(),
             body: c.preview.as_str().into(),
+            tag: c.tag.as_str().into(),
         })
         .collect();
     d.set_snippets(slint::ModelRc::new(slint::VecModel::from(model_rows)));
@@ -1785,6 +1818,8 @@ where
 
     t.set_selection_filter_placeholder(m("selection-filter-placeholder").into());
     t.set_selection_empty(m("selection-empty").into());
+    t.set_selection_tag_history(m("selection-tag-history").into());
+    t.set_selection_hint(m("selection-hint").into());
 
     t.set_clipboard_history_folder(m("clipboard-history-folder").into());
 }

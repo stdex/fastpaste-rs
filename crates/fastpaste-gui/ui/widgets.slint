@@ -64,16 +64,15 @@ export global Theme {
 
     // Accent (selection, focus, primary buttons).
     out property <color> accent: #2563eb;
-    // Focus ring: a translucent halo outside the border, so focus is
-    // visible without the border colour alone having to carry it.
-    out property <color> focus-ring: #2563eb40;
     out property <color> accent-hover: #3b74f0;
     out property <color> accent-pressed: #1d4ed8;
     out property <color> accent-foreground: #ffffff;
     out property <color> selection-bg: #dbeafe;
     out property <color> selection-fg: #1e40af;
-    // Validation / error text (the options dialog's status line).
+    // Destructive actions and validation errors.
     out property <color> danger: #b42318;
+    out property <color> danger-hover: #c9372c;
+    out property <color> danger-pressed: #912018;
 }
 
 // ───────────────────────────── FButton ───────────────────────────────
@@ -83,6 +82,10 @@ export global Theme {
 export component FButton inherits Rectangle {
     in property <string> text;
     in property <bool> primary: false;
+    /// Destructive action. Combined with `primary` it fills red — for a
+    /// confirm button that deletes an arbitrarily large subtree with no
+    /// undo, looking identical to Cancel is the wrong default.
+    in property <bool> danger: false;
     in property <bool> enabled: true;
     callback clicked();
 
@@ -110,8 +113,13 @@ export component FButton inherits Rectangle {
     border-width: 1px;
     // The primary variant carries its own border so the 1px ring stays
     // in the accent family; neutral buttons use the standard border.
-    border-color: root.primary ? Theme.accent : Theme.border;
-    background: root.primary ? Theme.accent : Theme.surface;
+    // Fill colour of the emphasised variant: red when destructive.
+    property <color> fill: root.danger ? Theme.danger : Theme.accent;
+    property <color> fill-hover: root.danger ? Theme.danger-hover : Theme.accent-hover;
+    property <color> fill-pressed: root.danger ? Theme.danger-pressed : Theme.accent-pressed;
+
+    border-color: root.primary ? root.fill : Theme.border;
+    background: root.primary ? root.fill : Theme.surface;
 
     states [
         disabled when !root.enabled : {
@@ -119,15 +127,15 @@ export component FButton inherits Rectangle {
             border-color: Theme.border;
         }
         pressed when touch.pressed && root.enabled : {
-            background: root.primary ? Theme.accent-pressed : Theme.pressed-bg;
-            border-color: root.primary ? Theme.accent-pressed : Theme.border-strong;
+            background: root.primary ? root.fill-pressed : Theme.pressed-bg;
+            border-color: root.primary ? root.fill-pressed : Theme.border-strong;
         }
         hover when touch.has-hover && root.enabled : {
-            background: root.primary ? Theme.accent-hover : Theme.hover-bg;
-            border-color: root.primary ? Theme.accent-hover : Theme.border-strong;
+            background: root.primary ? root.fill-hover : Theme.hover-bg;
+            border-color: root.primary ? root.fill-hover : Theme.border-strong;
         }
         focused when keys.has-focus && root.enabled : {
-            border-color: Theme.accent;
+            border-color: root.primary ? root.fill : Theme.accent;
         }
     ]
 
@@ -142,6 +150,7 @@ export component FButton inherits Rectangle {
             font-size: Theme.font-size;
             color: !root.enabled ? Theme.text-muted
                 : root.primary ? Theme.accent-foreground
+                : root.danger ? Theme.danger
                 : Theme.text;
             overflow: elide;
         }

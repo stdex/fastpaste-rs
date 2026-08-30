@@ -50,3 +50,5 @@ options-error-hotkey-invalid = Dieses Tastenkürzel konnte nicht registriert wer
 options-error-save-failed = Einstellungen für diese Sitzung übernommen, aber nicht gespeichert.
 selection-filter-placeholder = Zum Filtern tippen
 selection-empty = Noch keine Schnipsel.
+selection-tag-history = Verlauf
+selection-hint = ↑↓ auswählen · Enter einfügen · Esc schließen

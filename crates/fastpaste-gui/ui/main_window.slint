@@ -106,9 +106,21 @@ export component MainWindow inherits Window {
                     text: Translations.toolbar-add-snippet;
                     clicked => { root.add-plain-clicked(); }
                 }
+                // Destructive action, kept off the shoulder of the two
+                // additive ones.
+                Rectangle {
+                    width: Theme.spacing;
+                    horizontal-stretch: 0;
+                }
                 FButton {
                     text: Translations.toolbar-delete;
+                    danger: true;
                     clicked => { root.delete-clicked(); }
+                }
+                Rectangle {
+                    width: 1px;
+                    horizontal-stretch: 0;
+                    background: Theme.border;
                 }
                 FButton {
                     text: "↑";
@@ -278,6 +290,8 @@ export component MainWindow inherits Window {
                     }
                     FButton {
                         text: Translations.confirm-yes;
+                        primary: true;
+                        danger: true;
                         clicked => {
                             root.confirm-delete-visible = false;
                             root.delete-confirmed();

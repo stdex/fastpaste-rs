@@ -57,3 +57,5 @@ options-error-hotkey-invalid = That shortcut could not be registered.
 options-error-save-failed = Settings applied for this session, but could not be saved to disk.
 selection-filter-placeholder = Type to filter
 selection-empty = No snippets yet.
+selection-tag-history = History
+selection-hint = ↑↓ select · Enter paste · Esc close

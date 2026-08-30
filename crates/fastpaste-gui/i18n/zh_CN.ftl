@@ -50,3 +50,5 @@ options-error-hotkey-invalid = 无法注册该快捷键。
 options-error-save-failed = 设置已在本次会话生效，但未能保存到磁盘。
 selection-filter-placeholder = 输入以筛选
 selection-empty = 还没有片段。
+selection-tag-history = 历史
+selection-hint = ↑↓ 选择 · Enter 粘贴 · Esc 关闭

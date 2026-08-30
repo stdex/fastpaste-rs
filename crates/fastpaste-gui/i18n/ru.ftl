@@ -51,3 +51,5 @@ options-error-hotkey-invalid = Не удалось зарегистрирова�
 options-error-save-failed = Настройки применены для текущего сеанса, но не сохранены на диск.
 selection-filter-placeholder = Введите для фильтрации
 selection-empty = Пока нет фрагментов.
+selection-tag-history = История
+selection-hint = ↑↓ выбрать · Enter вставить · Esc закрыть

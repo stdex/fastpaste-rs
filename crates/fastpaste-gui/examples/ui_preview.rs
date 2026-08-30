@@ -144,28 +144,34 @@ fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
 fn build_selection() -> Result<SelectionDialog, slint::PlatformError> {
     let d = SelectionDialog::new()?;
     let rows: Vec<SnippetRow> = [
-        ("История: git status", "git status --short"),
-        ("Адрес электронной почты", "user@example.com"),
-        ("Подпись", "С уважением, команда fastpaste"),
+        ("git status --short", "", "История"),
+        ("cargo test --workspace", "", "История"),
+        ("Адрес электронной почты", "user@example.com", ""),
+        ("Подпись", "С уважением, команда fastpaste", ""),
         (
             "SQL: выборка",
             "SELECT id, title FROM items ORDER BY order_index;",
+            "",
         ),
         (
             "Лицензия MIT",
             "Permission is hereby granted, free of charge, to any person",
+            "",
         ),
     ]
     .iter()
-    .map(|(t, b)| SnippetRow {
+    .map(|(t, b, tag)| SnippetRow {
         title: (*t).into(),
         body: (*b).into(),
+        tag: (*tag).into(),
     })
     .collect();
     d.set_snippets(slint::ModelRc::new(slint::VecModel::from(rows)));
     let t = Translations::get(&d);
     t.set_selection_dialog_title("Выберите строку для вставки".into());
     t.set_selection_filter_placeholder("Введите для фильтрации".into());
+    t.set_selection_hint("↑↓ выбрать · Enter вставить · Esc закрыть".into());
+    t.set_selection_tag_history("История".into());
     d.show()?;
     Ok(d)
 }
@@ -173,6 +179,22 @@ fn build_selection() -> Result<SelectionDialog, slint::PlatformError> {
 fn build_main_with(confirm: bool) -> Result<MainWindow, slint::PlatformError> {
     use slint_tree_view::TreeItem;
     let w = MainWindow::new()?;
+
+    // Mirror the palette the app installs in `build_main_window`. Without
+    // it the preview renders the TreeView's stock style, so it would be
+    // showing something the user never sees — which makes it useless for
+    // exactly the question it exists to answer.
+    {
+        use slint::Global;
+        let rgb = slint::Color::from_rgb_u8;
+        let style = slint_tree_view::TreeViewStyle::get(&w);
+        style.set_background_color(rgb(0xff, 0xff, 0xff));
+        style.set_text_color(rgb(0x21, 0x25, 0x29));
+        style.set_highlight_color(rgb(0xdb, 0xea, 0xfe));
+        style.set_highlighted_text_color(rgb(0xff, 0xff, 0xff));
+        style.set_hover_color(rgb(0xe9, 0xec, 0xef));
+        style.set_branch_indicator_color(rgb(0x6a, 0x73, 0x7d));
+    }
     let t = Translations::get(&w);
     t.set_toolbar_add_folder("📁 Папка".into());
     t.set_toolbar_add_snippet("📄 Фрагмент".into());
