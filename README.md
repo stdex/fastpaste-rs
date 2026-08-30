@@ -62,6 +62,26 @@ The app starts and stays useful when a piece of the desktop is missing:
 cargo build --release
 ```
 
+## Looking at the UI
+
+The app needs a compositor to run, which makes "does this layout look
+right" hard to answer on a build machine. `examples/ui_preview.rs`
+renders a window with representative data straight to a pixel buffer via
+Slint's software renderer — no display, no compositor:
+
+```
+cargo run --example ui_preview -- options 2 out.ppm   # options dialog, page 2
+cargo run --example ui_preview -- main   0 out.ppm    # main window
+cargo run --example ui_preview -- select 0 out.ppm    # selection dialog
+ffmpeg -i out.ppm out.png                             # P6 -> PNG
+```
+
+It seeds the longest shipped locale (Russian), because label clipping
+and column overflow only show up in the widest strings. The example
+pulls in `slint`'s `software-renderer-systemfonts` feature as a
+**dev-dependency**, so the shipped binary is unaffected — but it does
+make `cargo test` builds larger.
+
 ## Run
 
 ```

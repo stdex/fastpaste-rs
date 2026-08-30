@@ -19,14 +19,37 @@
 
 export global Theme {
     // Density.
-    out property <length> control-height: 28px;
+    //
+    // Controls pin their height with min + max + `vertical-stretch: 0`.
+    // A bare `Rectangle` in Slint has stretch 1 on both axes, so a
+    // control that only sets `min-height` absorbs the free space in its
+    // layout — which is how a 28px spin box rendered 100px tall and the
+    // dialog buttons rendered 160px tall.
+    //
+    // Note what this does NOT cover: `max-height` constrains the layout's
+    // MAIN axis only. On the cross axis a layout stretches its children
+    // regardless, so a button inside a `HorizontalLayout` taller than
+    // `control-height` is sized by that layout's vertical padding, not by
+    // its own max-height. Both the options footer and the main-window
+    // toolbar set that padding deliberately.
+    out property <length> control-height: 30px;
     out property <length> control-height-s: 24px;
     out property <length> spacing: 8px;
     out property <length> spacing-s: 4px;
+    // Vertical rhythm inside a form: rows sit further apart than the
+    // items within a row.
+    out property <length> row-spacing: 14px;
     out property <length> padding: 12px;
-    out property <length> radius: 4px;
+    out property <length> padding-l: 20px;
+    out property <length> radius: 6px;
     out property <length> font-size: 13px;
     out property <length> font-size-s: 12px;
+    out property <length> font-size-title: 15px;
+    // Width of a single-line field. Set as a MINIMUM with a stretchy
+    // spacer column beside it, never as a `max-width`: a cell's
+    // max-width caps the whole GridLayout column, which silently elided
+    // the longer checkbox captions sharing that column.
+    out property <length> field-width: 240px;
 
     // Neutrals (light theme).
     out property <color> window-bg: #f2f3f5;   // window chrome / sidebar strip
@@ -41,6 +64,9 @@ export global Theme {
 
     // Accent (selection, focus, primary buttons).
     out property <color> accent: #2563eb;
+    // Focus ring: a translucent halo outside the border, so focus is
+    // visible without the border colour alone having to carry it.
+    out property <color> focus-ring: #2563eb40;
     out property <color> accent-hover: #3b74f0;
     out property <color> accent-pressed: #1d4ed8;
     out property <color> accent-foreground: #ffffff;
@@ -74,7 +100,12 @@ export component FButton inherits Rectangle {
     // keyboard-driven operation.
     forward-focus: keys;
 
+    // Pinned height, and no stretch on either axis: a button hugs its
+    // caption instead of being inflated by the layout around it.
     min-height: Theme.control-height;
+    max-height: Theme.control-height;
+    vertical-stretch: 0;
+    horizontal-stretch: 0;
     border-radius: Theme.radius;
     border-width: 1px;
     // The primary variant carries its own border so the 1px ring stays
@@ -156,8 +187,10 @@ export component FLineEdit inherits Rectangle {
     accessible-value <=> root.text;
 
     min-height: Theme.control-height;
-    min-width: 64px;
-    horizontal-stretch: 1;
+    max-height: Theme.control-height;
+    vertical-stretch: 0;
+    min-width: Theme.field-width;
+    horizontal-stretch: 0;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: input.has-focus ? Theme.accent : Theme.border;
@@ -166,11 +199,14 @@ export component FLineEdit inherits Rectangle {
     forward-focus: input;
 
     input := TextInput {
-        x: 8px;
-        width: parent.width - 16px;
-        // Vertical centering by absolute placement — layouts would
-        // stretch the TextInput to the full row height.
-        y: (parent.height - self.preferred-height) / 2;
+        x: 10px;
+        width: parent.width - 20px;
+        // Fill the row and centre the text within it. The previous
+        // `y: (parent.height - preferred-height) / 2` fought the
+        // `vertical-alignment: center` below and left the text sitting
+        // low in the field.
+        y: 0;
+        height: 100%;
         text <=> root.text;
         enabled: root.enabled;
         read-only: root.read-only;
@@ -210,8 +246,10 @@ export component FComboBox inherits Rectangle {
     accessible-enabled: root.enabled;
 
     min-height: Theme.control-height;
-    min-width: 96px;
-    horizontal-stretch: 1;
+    max-height: Theme.control-height;
+    vertical-stretch: 0;
+    min-width: Theme.field-width;
+    horizontal-stretch: 0;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.border;
@@ -343,11 +381,17 @@ export component FCheckBox inherits Rectangle {
 
     forward-focus: keys;
 
+    // No `max-height`: the shipped captions are full sentences in some
+    // locales ("Восстанавливать содержимое буфера обмена после вставки"),
+    // and eliding a setting's own description is worse than letting the
+    // row grow. `vertical-stretch: 0` still keeps the layout from
+    // inflating it beyond its content.
     min-height: Theme.control-height;
+    vertical-stretch: 0;
 
     HorizontalLayout {
-        padding-left: Theme.spacing-s;
         spacing: Theme.spacing;
+        alignment: start;
 
         box := Rectangle {
             width: 16px;
@@ -379,7 +423,7 @@ export component FCheckBox inherits Rectangle {
             vertical-alignment: center;
             font-size: Theme.font-size;
             color: root.enabled ? Theme.text : Theme.text-muted;
-            overflow: elide;
+            wrap: word-wrap;
             horizontal-stretch: 1;
         }
     }
@@ -421,10 +465,14 @@ export component FSpinBox inherits Rectangle {
     callback value-changed(int);
 
     min-height: Theme.control-height;
-    min-width: 110px;
+    max-height: Theme.control-height;
+    vertical-stretch: 0;
+    min-width: 104px;
+    max-width: 104px;
+    horizontal-stretch: 0;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: Theme.border;
+    border-color: input.has-focus ? Theme.accent : Theme.border;
     background: root.enabled ? Theme.surface : Theme.disabled-bg;
 
     function clamp(v: int) -> int {
@@ -478,7 +526,8 @@ export component FSpinBox inherits Rectangle {
             input := TextInput {
                 x: 4px;
                 width: parent.width - 8px;
-                y: (parent.height - self.preferred-height) / 2;
+                y: 0;
+                height: 100%;
                 text: root.value;
                 enabled: root.enabled;
                 input-type: InputType.number;
@@ -537,10 +586,11 @@ export component FSidebar inherits Rectangle {
     in-out property <int> current-index: 0;
     callback changed(/* index */ int);
 
-    // Wide enough for the longest shipped tab title ("История буфера
-    // обмена" at 13px ≈ 165px of glyphs + leading pad + accent bar) —
-    // narrower values elide it.
-    min-width: 190px;
+    // Wide enough for the longest shipped tab title — "История буфера
+    // обмена" is the widest at 13px, and it elided at 190px once the
+    // accent bar and padding were accounted for.
+    min-width: 200px;
+    horizontal-stretch: 0;
     background: Theme.window-bg;
 
     VerticalLayout {

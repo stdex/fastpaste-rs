@@ -87,11 +87,16 @@ export component MainWindow inherits Window {
         // Compact toolbar on a raised surface, separated by a hairline.
         Rectangle {
             height: Theme.control-height + 2 * 6px;
+            vertical-stretch: 0;
             background: Theme.surface;
 
             HorizontalLayout {
-                padding: 6px;
+                padding-left: Theme.spacing;
+                padding-right: Theme.spacing;
+                padding-top: 6px;
+                padding-bottom: 6px;
                 spacing: Theme.spacing-s;
+                alignment: start;
 
                 FButton {
                     text: Translations.toolbar-add-folder;
@@ -119,6 +124,7 @@ export component MainWindow inherits Window {
         }
         Rectangle {
             height: 1px;
+            vertical-stretch: 0;
             background: Theme.border;
         }
 
@@ -129,7 +135,10 @@ export component MainWindow inherits Window {
             // we mirror `current-index` here so MainWindow stays the
             // single source of truth.
             tv := TreeView {
+                // The tree is the fixed pane; the editor takes the rest.
                 preferred-width: 320px;
+                min-width: 220px;
+                horizontal-stretch: 0;
                 model: root.tree-model;
                 // TWO-WAY (`<=>`), never `:`. The TreeView assigns its own
                 // `current-index` on a row click and in set-current /
@@ -166,16 +175,22 @@ export component MainWindow inherits Window {
                 }
             }
 
-            // Vertical separator.
+            // Hairline between the panes. `horizontal-stretch: 0` is
+            // load-bearing: a bare Rectangle stretches by default, so
+            // this "1px" rule absorbed every spare pixel and rendered as
+            // a ~245px grey column that squeezed the editor to a
+            // letter-per-line sliver.
             Rectangle {
-                preferred-width: 1px;
+                width: 1px;
+                horizontal-stretch: 0;
                 background: Theme.border;
             }
 
-            // Editor pane.
+            // Editor pane — takes whatever the tree does not.
             VerticalLayout {
+                horizontal-stretch: 1;
                 padding: Theme.padding;
-                spacing: Theme.spacing;
+                spacing: Theme.spacing-s;
 
                 Text {
                     text: Translations.editor-title-label;

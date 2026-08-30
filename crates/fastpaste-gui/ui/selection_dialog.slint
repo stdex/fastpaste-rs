@@ -107,6 +107,7 @@ export component SelectionDialog inherits Window {
         // ── Filter ───────────────────────────────────────────────────
         Rectangle {
             height: Theme.control-height + 12px;
+            vertical-stretch: 0;
             background: Theme.surface;
 
             Rectangle {
@@ -119,9 +120,11 @@ export component SelectionDialog inherits Window {
                 border-width: 1px;
                 border-radius: Theme.radius;
 
+                // Same inset as the TextInput below, or the placeholder
+                // and the caret sit a couple of pixels apart.
                 if root.filter-text == "": Text {
-                    x: 8px;
-                    width: parent.width - 16px;
+                    x: 10px;
+                    width: parent.width - 20px;
                     height: 100%;
                     vertical-alignment: center;
                     text: Translations.selection-filter-placeholder;
@@ -131,8 +134,8 @@ export component SelectionDialog inherits Window {
                 }
 
                 filter := TextInput {
-                    x: 8px;
-                    width: parent.width - 16px;
+                    x: 10px;
+                    width: parent.width - 20px;
                     height: 100%;
                     vertical-alignment: center;
                     font-size: Theme.font-size;
@@ -188,6 +191,7 @@ export component SelectionDialog inherits Window {
 
         Rectangle {
             height: 1px;
+            vertical-stretch: 0;
             background: Theme.border;
         }
 

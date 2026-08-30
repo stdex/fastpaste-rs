@@ -29,28 +29,48 @@ export struct LanguageOption {
     label: string,  // e.g. "System default", "English"
 }
 
-// One form row: fixed-width label column + a stretching control. Shared
-// by every page so the label gutters line up across the dialog (the old
-// stacked VerticalLayout produced ragged, misaligned rows).
-component FormRow inherits HorizontalLayout {
-    in property <string> label;
-    spacing: Theme.spacing;
+// A form label.
+//
+// Pages lay out with `GridLayout`, so the label column sizes itself to
+// the longest label on that page and every control shares one left edge.
+// The previous `width: 150px` gutter was not a grid at all: it clipped
+// the Russian and German labels mid-word, and rows whose control was a
+// checkbox skipped the gutter entirely, so nothing lined up.
+component FLabel inherits Text {
+    vertical-alignment: center;
+    horizontal-alignment: left;
+    font-size: Theme.font-size;
+    color: Theme.text;
+    // Labels are the one thing allowed to set the column width.
+    horizontal-stretch: 0;
+}
 
-    Text {
-        width: 150px;
-        text: root.label;
-        vertical-alignment: center;
-        font-size: Theme.font-size;
-        color: Theme.text;
-    }
+// Muted explanatory line under a group of fields.
+component FHint inherits Text {
+    wrap: word-wrap;
+    font-size: Theme.font-size-s;
+    color: Theme.text-muted;
+    horizontal-stretch: 1;
+}
 
-    @children
+// Page heading. The sidebar already names the section, but without a
+// heading the form starts flush against the top edge with no anchor.
+component FPageTitle inherits Text {
+    font-size: Theme.font-size-title;
+    font-weight: 600;
+    color: Theme.text;
+    vertical-stretch: 0;
 }
 
 export component OptionsDialog inherits Window {
     title: "fastpaste — " + Translations.options-title;
-    preferred-width: 560px;
-    preferred-height: 400px;
+    // Sized for the widest shipped locale: a 200px sidebar, the longest
+    // Russian label, and a 240px field all have to fit on one row
+    // without the field running off the edge.
+    preferred-width: 700px;
+    preferred-height: 460px;
+    min-width: 640px;
+    min-height: 380px;
     background: Theme.window-bg;
 
     // Accepted numeric ranges, pushed from Rust so `MAX_ITEMS_RANGE` /
@@ -125,9 +145,12 @@ export component OptionsDialog inherits Window {
                 current-index <=> root.active-page;
             }
 
-            // Vertical separator between sidebar and form.
+            // Hairline between sidebar and form. `horizontal-stretch: 0`
+            // is load-bearing: a bare Rectangle stretches by default, and
+            // this 1px rule rendered as a ~15px grey column.
             Rectangle {
-                preferred-width: 1px;
+                width: 1px;
+                horizontal-stretch: 0;
                 background: Theme.border;
             }
 
@@ -136,76 +159,120 @@ export component OptionsDialog inherits Window {
                 horizontal-stretch: 1;
 
                 VerticalLayout {
-                    padding: Theme.padding + Theme.spacing-s;
+                    padding: Theme.padding-l;
                     spacing: Theme.spacing;
+                    // Rows sit at the top of the page and keep their own
+                    // height; without this the layout spreads them down
+                    // the full height of the dialog.
+                    alignment: start;
 
                     // -- General (page 0) --
                     if root.active-page == 0: VerticalLayout {
                         spacing: Theme.spacing;
+                        alignment: start;
 
-                        FormRow {
-                            label: Translations.options-language-label;
-                            FComboBox {
-                                model: root.language-labels;
-                                current-index <=> root.language-index;
+                        FPageTitle { text: Translations.options-general; }
+
+                        GridLayout {
+                            spacing-horizontal: Theme.spacing;
+                            spacing-vertical: Theme.row-spacing;
+
+                            Row {
+                                FLabel { text: Translations.options-language-label; }
+                                FComboBox {
+                                    model: root.language-labels;
+                                    current-index <=> root.language-index;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        Text {
-                            text: Translations.options-language-hint;
-                            wrap: word-wrap;
-                            font-size: Theme.font-size-s;
-                            color: Theme.text-muted;
+                            Row {
+                                FLabel { text: ""; }
+                                FHint { colspan: 2; text: Translations.options-language-hint; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
                         }
                     }
 
                     // -- Hot Keys (page 1) --
                     if root.active-page == 1: VerticalLayout {
                         spacing: Theme.spacing;
+                        alignment: start;
 
-                        FormRow {
-                            label: Translations.options-open-dialog-label;
-                            FLineEdit {
-                                text <=> root.hotkey-open-dialog;
+                        FPageTitle { text: Translations.options-hotkeys; }
+
+                        GridLayout {
+                            spacing-horizontal: Theme.spacing;
+                            spacing-vertical: Theme.row-spacing;
+
+                            Row {
+                                FLabel { text: Translations.options-open-dialog-label; }
+                                FLineEdit { text <=> root.hotkey-open-dialog; }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        FormRow {
-                            label: Translations.options-open-main-window-label;
-                            FLineEdit {
-                                text <=> root.hotkey-open-main-window;
+                            Row {
+                                FLabel { text: Translations.options-open-main-window-label; }
+                                FLineEdit { text <=> root.hotkey-open-main-window; }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        Text {
-                            text: Translations.options-hotkeys-hint;
-                            wrap: word-wrap;
-                            font-size: Theme.font-size-s;
-                            color: Theme.text-muted;
+                            Row {
+                                FLabel { text: ""; }
+                                FHint { colspan: 2; text: Translations.options-hotkeys-hint; }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
                         }
                     }
 
                     // -- Clipboard History (page 2) --
                     if root.active-page == 2: VerticalLayout {
                         spacing: Theme.spacing;
+                        alignment: start;
 
-                        FCheckBox {
-                            text: Translations.options-capture-history;
-                            checked <=> root.history-enabled;
-                        }
-                        FormRow {
-                            label: Translations.options-max-items-label;
-                            FSpinBox {
-                                minimum: root.history-max-items-min;
-                                maximum: root.history-max-items-max;
-                                value <=> root.history-max-items;
+                        FPageTitle { text: Translations.options-clipboard-history; }
+
+                        GridLayout {
+                            spacing-horizontal: Theme.spacing;
+                            spacing-vertical: Theme.row-spacing;
+
+                            // The checkbox sits in the CONTROL column, not
+                            // flush left, so every interactive element on
+                            // the page shares one left edge.
+                            Row {
+                                FLabel { text: ""; }
+                                FCheckBox {
+                                    colspan: 2;
+                                    text: Translations.options-capture-history;
+                                    checked <=> root.history-enabled;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        FormRow {
-                            label: Translations.options-folder-position-label;
-                            FComboBox {
-                                model: [
-                                    Translations.options-position-top,
-                                    Translations.options-position-bottom,
-                                ];
-                                current-index <=> root.history-position-index;
+                            Row {
+                                FLabel { text: Translations.options-max-items-label; }
+                                // A GridLayout stretches its cell to the
+                                // column, ignoring the child's own
+                                // max-width, so the narrow spin box would
+                                // be blown up to the width of the widest
+                                // control in the column. `alignment:
+                                // start` hands it its natural size.
+                                HorizontalLayout {
+                                    alignment: start;
+                                    FSpinBox {
+                                        minimum: root.history-max-items-min;
+                                        maximum: root.history-max-items-max;
+                                        value <=> root.history-max-items;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Row {
+                                FLabel { text: Translations.options-folder-position-label; }
+                                FComboBox {
+                                    model: [
+                                        Translations.options-position-top,
+                                        Translations.options-position-bottom,
+                                    ];
+                                    current-index <=> root.history-position-index;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
                         }
                     }
@@ -213,56 +280,96 @@ export component OptionsDialog inherits Window {
                     // -- Paste Options (page 3) --
                     if root.active-page == 3: VerticalLayout {
                         spacing: Theme.spacing;
+                        alignment: start;
 
-                        FormRow {
-                            label: Translations.options-paste-delay-label;
-                            FSpinBox {
-                                minimum: root.paste-delay-min;
-                                maximum: root.paste-delay-max;
-                                value <=> root.paste-delay-ms;
+                        FPageTitle { text: Translations.options-paste; }
+
+                        GridLayout {
+                            spacing-horizontal: Theme.spacing;
+                            spacing-vertical: Theme.row-spacing;
+
+                            Row {
+                                FLabel { text: Translations.options-paste-delay-label; }
+                                HorizontalLayout {
+                                    alignment: start;
+                                    FSpinBox {
+                                        minimum: root.paste-delay-min;
+                                        maximum: root.paste-delay-max;
+                                        value <=> root.paste-delay-ms;
+                                    }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
                             }
-                        }
-                        FCheckBox {
-                            text: Translations.options-restore-clipboard;
-                            checked <=> root.paste-restore-clipboard;
+                            Row {
+                                FLabel { text: ""; }
+                                FCheckBox {
+                                    colspan: 2;
+                                    text: Translations.options-restore-clipboard;
+                                    checked <=> root.paste-restore-clipboard;
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Vertical separator between body and button bar.
+        // Hairline above the button bar. Same stretch caveat as the
+        // vertical rule above.
         Rectangle {
             height: 1px;
+            vertical-stretch: 0;
             background: Theme.border;
         }
 
         // ---- Bottom button bar ----
-        HorizontalLayout {
-            padding: Theme.spacing;
-            spacing: Theme.spacing;
+        Rectangle {
+            background: Theme.window-bg;
+            vertical-stretch: 0;
+            height: Theme.control-height + 2 * Theme.padding;
 
-            Text {
-                horizontal-stretch: 1;
-                vertical-alignment: center;
-                text: root.status-message;
-                font-size: Theme.font-size-s;
-                color: Theme.danger;
-                wrap: word-wrap;
-            }
+            HorizontalLayout {
+                padding-left: Theme.padding-l;
+                padding-right: Theme.padding-l;
+                // Vertical padding is what actually sizes the buttons.
+                // A layout stretches its children on the CROSS axis and
+                // a child's `max-height` does not stop it, so the only
+                // reliable way to get a `control-height` button is to
+                // make the content box exactly that tall. Without these
+                // two lines the buttons filled the whole 54px bar.
+                padding-top: Theme.padding;
+                padding-bottom: Theme.padding;
+                spacing: Theme.spacing;
 
-            FButton {
-                text: Translations.options-cancel;
-                clicked => { root.cancel-clicked(); }
-            }
-            FButton {
-                text: Translations.options-apply;
-                clicked => { root.apply-clicked(); }
-            }
-            FButton {
-                text: Translations.options-ok;
-                primary: true;
-                clicked => { root.ok-clicked(); }
+                Text {
+                    horizontal-stretch: 1;
+                    vertical-alignment: center;
+                    text: root.status-message;
+                    font-size: Theme.font-size-s;
+                    color: Theme.danger;
+                    wrap: word-wrap;
+                }
+
+                // A shared minimum keeps the three buttons the same
+                // width regardless of caption length, which is what
+                // makes a button row read as a row.
+                FButton {
+                    min-width: 92px;
+                    text: Translations.options-cancel;
+                    clicked => { root.cancel-clicked(); }
+                }
+                FButton {
+                    min-width: 92px;
+                    text: Translations.options-apply;
+                    clicked => { root.apply-clicked(); }
+                }
+                FButton {
+                    min-width: 92px;
+                    text: Translations.options-ok;
+                    primary: true;
+                    clicked => { root.ok-clicked(); }
+                }
             }
         }
     }

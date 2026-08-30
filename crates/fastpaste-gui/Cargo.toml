@@ -23,6 +23,11 @@ fastpaste-data = { path = "../fastpaste-data" }
 [dev-dependencies]
 chrono.workspace = true
 fluent-syntax.workspace = true
+# Only the `ui_preview` example needs this: it renders a window to a
+# pixel buffer with no display, which requires the software renderer to
+# be able to find system fonts. A dev-dependency, so the shipped binary
+# is unaffected.
+slint = { workspace = true, features = ["software-renderer-systemfonts"] }
 
 [build-dependencies]
 slint-build = { workspace = true, features = ["experimental-module-builds"] }
