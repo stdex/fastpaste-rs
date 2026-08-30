@@ -35,11 +35,6 @@ rather than silently reverted.
 
 ![Options dialog](docs/screenshots/options-dialog.png)
 
-<sub>Rendered headlessly with `cargo run --example ui_preview` (see
-[Looking at the UI](#looking-at-the-ui)). The software renderer has no
-colour-emoji support, so the toolbar and tree icons the real app draws
-are missing here.</sub>
-
 ## Features
 
 - Main window: snippet/folder tree (CRUD) with an editor pane and toolbar.
