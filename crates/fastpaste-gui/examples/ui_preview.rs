@@ -33,6 +33,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let which = args.next().unwrap_or_else(|| "options".into());
     let page: i32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let out = args.next().unwrap_or_else(|| "preview.ppm".into());
+    // Language of the seeded strings. Russian by default — it is the
+    // widest shipped locale, and label clipping only shows up there.
+    // `en` is for README screenshots.
+    let ru = args.next().as_deref() != Some("en");
 
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
     slint::platform::set_platform(Box::new(PreviewPlatform {
@@ -47,9 +51,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Keep the component alive for the whole render.
     let _keep: Box<dyn std::any::Any> = match which.as_str() {
-        "options" => Box::new(build_options(page)?),
-        "select" => Box::new(build_selection()?),
-        _ => Box::new(build_main_with(page == 1)?),
+        "options" => Box::new(build_options(page, ru)?),
+        "select" => Box::new(build_selection(ru)?),
+        _ => Box::new(build_main_with(page == 1, ru)?),
     };
 
     window.set_size(slint::PhysicalSize::new(w, h));
@@ -70,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
+fn build_options(page: i32, ru: bool) -> Result<OptionsDialog, slint::PlatformError> {
     let d = OptionsDialog::new()?;
     let langs = [
         "System default",
@@ -95,35 +99,42 @@ fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
             .map(|l| slint::SharedString::from(*l))
             .collect::<Vec<_>>(),
     )));
-    // Russian strings: the longest labels the app ships, and the ones the
-    // fixed-width label gutter has to survive.
-    let t = Translations::get(&d);
-    t.set_options_title("Настройки".into());
-    t.set_options_general("Общие".into());
-    t.set_options_hotkeys("Горячие клавиши".into());
-    t.set_options_clipboard_history("История буфера обмена".into());
-    t.set_options_paste("Параметры вставки".into());
-    t.set_options_language_label("Язык:".into());
-    t.set_options_language_hint(
-        "Выберите язык приложения. «Системный» — использовать язык операционной системы.".into(),
-    );
-    t.set_options_open_dialog_label("Открыть диалог выбора:".into());
-    t.set_options_open_main_window_label("Открыть главное окно:".into());
-    t.set_options_hotkeys_hint(
-        "Модификаторы: Ctrl, Alt, Shift, Super. Объединяются через «+». Пример: Ctrl+Alt+V".into(),
-    );
-    t.set_options_capture_history("Отслеживать изменения буфера обмена".into());
-    t.set_options_max_items_label("Макс. элементов:".into());
-    t.set_options_folder_position_label("Положение папки:".into());
-    t.set_options_position_top("Сверху".into());
-    t.set_options_position_bottom("Снизу".into());
-    t.set_options_paste_delay_label("Задержка вставки (мс):".into());
-    t.set_options_restore_clipboard(
-        "Восстанавливать содержимое буфера обмена после вставки".into(),
-    );
-    t.set_options_ok("ОК".into());
-    t.set_options_cancel("Отмена".into());
-    t.set_options_apply("Применить".into());
+    // Seed the widest shipped locale by default: label clipping and
+    // column overflow only show up in the longest strings. English is
+    // for README screenshots.
+    if ru {
+        // Russian strings: the longest labels the app ships, and the ones the
+        // fixed-width label gutter has to survive.
+        let t = Translations::get(&d);
+        t.set_options_title("Настройки".into());
+        t.set_options_general("Общие".into());
+        t.set_options_hotkeys("Горячие клавиши".into());
+        t.set_options_clipboard_history("История буфера обмена".into());
+        t.set_options_paste("Параметры вставки".into());
+        t.set_options_language_label("Язык:".into());
+        t.set_options_language_hint(
+            "Выберите язык приложения. «Системный» — использовать язык операционной системы."
+                .into(),
+        );
+        t.set_options_open_dialog_label("Открыть диалог выбора:".into());
+        t.set_options_open_main_window_label("Открыть главное окно:".into());
+        t.set_options_hotkeys_hint(
+            "Модификаторы: Ctrl, Alt, Shift, Super. Объединяются через «+». Пример: Ctrl+Alt+V"
+                .into(),
+        );
+        t.set_options_capture_history("Отслеживать изменения буфера обмена".into());
+        t.set_options_max_items_label("Макс. элементов:".into());
+        t.set_options_folder_position_label("Положение папки:".into());
+        t.set_options_position_top("Сверху".into());
+        t.set_options_position_bottom("Снизу".into());
+        t.set_options_paste_delay_label("Задержка вставки (мс):".into());
+        t.set_options_restore_clipboard(
+            "Восстанавливать содержимое буфера обмена после вставки".into(),
+        );
+        t.set_options_ok("ОК".into());
+        t.set_options_cancel("Отмена".into());
+        t.set_options_apply("Применить".into());
+    }
 
     d.set_language_index(2);
     d.set_hotkey_open_dialog("Ctrl+Alt+V".into());
@@ -141,75 +152,122 @@ fn build_options(page: i32) -> Result<OptionsDialog, slint::PlatformError> {
     Ok(d)
 }
 
-fn build_selection() -> Result<SelectionDialog, slint::PlatformError> {
+fn build_selection(ru: bool) -> Result<SelectionDialog, slint::PlatformError> {
     let d = SelectionDialog::new()?;
-    let rows: Vec<SnippetRow> = [
-        ("Фрагменты", "", "", true),
-        ("Адрес электронной почты", "user@example.com", "", false),
-        ("Подпись", "С уважением, команда fastpaste", "", false),
-        (
-            "SQL: выборка",
-            "SELECT id, title FROM items ORDER BY order_index;",
-            "",
-            false,
-        ),
-        ("История буфера обмена", "", "", true),
-        ("git status --short", "", "История", false),
-        ("cargo test --workspace", "", "История", false),
-    ]
-    .iter()
-    .map(|(t, b, tag, hdr)| SnippetRow {
-        title: (*t).into(),
-        body: (*b).into(),
-        tag: (*tag).into(),
-        is_header: *hdr,
-    })
-    .collect();
+    let seed: &[(&str, &str, &str, bool)] = if ru {
+        &[
+            ("Фрагменты", "", "", true),
+            ("Адрес электронной почты", "user@example.com", "", false),
+            ("Подпись", "С уважением, команда fastpaste", "", false),
+            (
+                "SQL: выборка",
+                "SELECT id, title FROM items ORDER BY order_index;",
+                "",
+                false,
+            ),
+            ("История буфера обмена", "", "", true),
+            ("git status --short", "", "История", false),
+            ("cargo test --workspace", "", "История", false),
+        ]
+    } else {
+        &[
+            ("Snippets", "", "", true),
+            ("Email address", "user@example.com", "", false),
+            ("Signature", "Kind regards, the fastpaste team", "", false),
+            (
+                "SQL: select items",
+                "SELECT id, title FROM items ORDER BY order_index;",
+                "",
+                false,
+            ),
+            ("Clipboard History", "", "", true),
+            ("git status --short", "", "History", false),
+            ("cargo test --workspace", "", "History", false),
+        ]
+    };
+    let rows: Vec<SnippetRow> = seed
+        .iter()
+        .map(|(t, b, tag, hdr)| SnippetRow {
+            title: (*t).into(),
+            body: (*b).into(),
+            tag: (*tag).into(),
+            is_header: *hdr,
+        })
+        .collect();
     d.set_snippets(slint::ModelRc::new(slint::VecModel::from(rows)));
     d.set_selected_index(1);
-    let t = Translations::get(&d);
-    t.set_selection_dialog_title("Выберите строку для вставки".into());
-    t.set_selection_filter_placeholder("Введите для фильтрации".into());
-    t.set_selection_hint("↑↓ выбрать · Enter вставить · Esc закрыть".into());
-    t.set_selection_tag_history("История".into());
+    if ru {
+        let t = Translations::get(&d);
+        t.set_selection_dialog_title("Выберите строку для вставки".into());
+        t.set_selection_filter_placeholder("Введите для фильтрации".into());
+        t.set_selection_hint("↑↓ выбрать · Enter вставить · Esc закрыть".into());
+        t.set_selection_tag_history("История".into());
+    }
     d.show()?;
     Ok(d)
 }
 
-fn build_main_with(confirm: bool) -> Result<MainWindow, slint::PlatformError> {
+fn build_main_with(confirm: bool, ru: bool) -> Result<MainWindow, slint::PlatformError> {
     use slint_tree_view::TreeItem;
     let w = MainWindow::new()?;
 
-    let t = Translations::get(&w);
-    t.set_toolbar_add_folder("📁 Папка".into());
-    t.set_toolbar_add_snippet("📄 Фрагмент".into());
-    t.set_toolbar_delete("🗑 Удалить".into());
-    t.set_editor_title_label("Заголовок:".into());
-    t.set_editor_body_label("Текст:".into());
+    if ru {
+        let t = Translations::get(&w);
+        t.set_toolbar_add_folder("📁 Папка".into());
+        t.set_toolbar_add_snippet("📄 Фрагмент".into());
+        t.set_toolbar_delete("🗑 Удалить".into());
+        t.set_editor_title_label("Заголовок:".into());
+        t.set_editor_body_label("Текст:".into());
+    }
+
+    // (folder, child a, child b, root leaf, history folder, history entry)
+    let n: [&str; 8] = if ru {
+        [
+            "Рабочие заметки",
+            "Приветствие",
+            "Здравствуйте!",
+            "Реквизиты",
+            "ИНН 7701234567",
+            "Подпись",
+            "С уважением",
+            "История буфера обмена",
+        ]
+    } else {
+        [
+            "Work notes",
+            "Greeting",
+            "Hello there!",
+            "Bank details",
+            "IBAN GB33BUKB20201555555555",
+            "Signature",
+            "Kind regards",
+            "Clipboard History",
+        ]
+    };
 
     let mut rows: Vec<TreeItem> = Vec::new();
-    let mut folder = TreeItem::branch(1, -1, 0, "Рабочие заметки")
+    let mut folder = TreeItem::branch(1, -1, 0, n[0])
         .with_icon("📁")
         .with_item_type(0);
     folder.has_children = true;
     folder.expanded = true;
     rows.push(folder);
     rows.push(
-        TreeItem::leaf(2, 1, 1, "Приветствие", "Здравствуйте!")
+        TreeItem::leaf(2, 1, 1, n[1], n[2])
             .with_icon("📄")
             .with_item_type(1),
     );
     rows.push(
-        TreeItem::leaf(3, 1, 1, "Реквизиты", "ИНН 7701234567")
+        TreeItem::leaf(3, 1, 1, n[3], n[4])
             .with_icon("📄")
             .with_item_type(1),
     );
     rows.push(
-        TreeItem::leaf(4, -1, 0, "Подпись", "С уважением")
+        TreeItem::leaf(4, -1, 0, n[5], n[6])
             .with_icon("📄")
             .with_item_type(1),
     );
-    let mut hist = TreeItem::branch(-1000, -1, 0, "История буфера обмена")
+    let mut hist = TreeItem::branch(-1000, -1, 0, n[7])
         .with_icon("🕒")
         .with_item_type(0);
     hist.has_children = true;
@@ -228,8 +286,15 @@ fn build_main_with(confirm: bool) -> Result<MainWindow, slint::PlatformError> {
     );
     w.set_tree_model(slint::ModelRc::new(slint::VecModel::from(rows)));
     w.set_current_index(1);
-    w.set_editor_title("Приветствие".into());
-    w.set_editor_body("Здравствуйте!\n\nСпасибо за обращение.".into());
+    w.set_editor_title(n[1].into());
+    w.set_editor_body(
+        if ru {
+            "Здравствуйте!\n\nСпасибо за обращение."
+        } else {
+            "Hello there!\n\nThanks for getting in touch."
+        }
+        .into(),
+    );
     w.set_editor_enabled(true);
     w.set_title_enabled(true);
     if confirm {

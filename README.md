@@ -17,6 +17,29 @@ Targets Wayland (KDE Plasma 6 / KWin). X11 sessions are not supported.
 > shortcut to KDE and giving the app an IPC entry point. Until then, the
 > tray icon and the main window are the reliable ways in.
 
+## Screenshots
+
+**Selection dialog** — the quick-paste popup. Type to filter, arrow to a
+row, Enter pastes. Saved snippets first, clipboard history last, each
+group under its own heading.
+
+![Selection dialog](docs/screenshots/selection-dialog.png)
+
+**Main window** — snippet/folder tree with an editor pane. The clipboard
+history appears as a virtual folder alongside the real ones.
+
+![Main window](docs/screenshots/main-window.png)
+
+**Options** — applied live; a rejected hotkey is reported in the dialog
+rather than silently reverted.
+
+![Options dialog](docs/screenshots/options-dialog.png)
+
+<sub>Rendered headlessly with `cargo run --example ui_preview` (see
+[Looking at the UI](#looking-at-the-ui)). The software renderer has no
+colour-emoji support, so the toolbar and tree icons the real app draws
+are missing here.</sub>
+
 ## Features
 
 - Main window: snippet/folder tree (CRUD) with an editor pane and toolbar.
@@ -85,14 +108,18 @@ renders a window with representative data straight to a pixel buffer via
 Slint's software renderer — no display, no compositor:
 
 ```
-cargo run --example ui_preview -- options 2 out.ppm   # options dialog, page 2
-cargo run --example ui_preview -- main   0 out.ppm    # main window
-cargo run --example ui_preview -- select 0 out.ppm    # selection dialog
-ffmpeg -i out.ppm out.png                             # P6 -> PNG
+cargo run --example ui_preview -- options 2 out.ppm      # options dialog, page 2
+cargo run --example ui_preview -- main   0 out.ppm       # main window
+cargo run --example ui_preview -- main   1 out.ppm       # …with the delete confirmation
+cargo run --example ui_preview -- select 0 out.ppm       # selection dialog
+cargo run --example ui_preview -- select 0 out.ppm en    # …seeded in English
+ffmpeg -i out.ppm out.png                                # P6 -> PNG
 ```
 
-It seeds the longest shipped locale (Russian), because label clipping
-and column overflow only show up in the widest strings. The example
+It seeds the longest shipped locale (Russian) by default, because label
+clipping and column overflow only show up in the widest strings. Pass
+`en` as the fourth argument for English — that is how the screenshots
+above are produced. The example
 pulls in `slint`'s `software-renderer-systemfonts` feature as a
 **dev-dependency**, so the shipped binary is unaffected — but it does
 make `cargo test` builds larger.
