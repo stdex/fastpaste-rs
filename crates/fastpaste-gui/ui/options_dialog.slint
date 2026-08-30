@@ -53,6 +53,22 @@ export component OptionsDialog inherits Window {
     preferred-height: 400px;
     background: Theme.window-bg;
 
+    // Accepted numeric ranges, pushed from Rust so `MAX_ITEMS_RANGE` /
+    // `DELAY_MS_RANGE` in `fastpaste-app` are the single authority.
+    // Hardcoding them here meant a legal config value (say max_items =
+    // 200) displayed fine but was squashed to the widget's own cap the
+    // moment the user touched the control, and then persisted.
+    in property <int> history-max-items-min: 1;
+    in property <int> history-max-items-max: 500;
+    in property <int> paste-delay-min: 0;
+    in property <int> paste-delay-max: 5000;
+
+    // Validation feedback. Non-empty text raises the status line in the
+    // button bar. Without it a rejected hotkey produced nothing but a log
+    // line the user never sees and a field that snapped back, which reads
+    // as "the button did nothing".
+    in-out property <string> status-message: "";
+
     // -- General -------------------------------------------------------------
     // `languages` carries the (code,label) pairs; `language-labels` is the
     // ComboBox's display model. `language-index` is the selected row.
@@ -82,6 +98,19 @@ export component OptionsDialog inherits Window {
     callback ok-clicked();
     callback cancel-clicked();
     callback apply-clicked();
+
+    keys := FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel-clicked();
+                return accept;
+            }
+            if (event.text == Key.Return) {
+                root.ok-clicked();
+                return accept;
+            }
+            reject
+        }
 
     VerticalLayout {
         // Top: sidebar (left) + form page (right).
@@ -164,8 +193,8 @@ export component OptionsDialog inherits Window {
                         FormRow {
                             label: Translations.options-max-items-label;
                             FSpinBox {
-                                minimum: 1;
-                                maximum: 50;
+                                minimum: root.history-max-items-min;
+                                maximum: root.history-max-items-max;
                                 value <=> root.history-max-items;
                             }
                         }
@@ -188,8 +217,8 @@ export component OptionsDialog inherits Window {
                         FormRow {
                             label: Translations.options-paste-delay-label;
                             FSpinBox {
-                                minimum: 0;
-                                maximum: 1000;
+                                minimum: root.paste-delay-min;
+                                maximum: root.paste-delay-max;
                                 value <=> root.paste-delay-ms;
                             }
                         }
@@ -212,7 +241,15 @@ export component OptionsDialog inherits Window {
         HorizontalLayout {
             padding: Theme.spacing;
             spacing: Theme.spacing;
-            alignment: end;
+
+            Text {
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                text: root.status-message;
+                font-size: Theme.font-size-s;
+                color: Theme.danger;
+                wrap: word-wrap;
+            }
 
             FButton {
                 text: Translations.options-cancel;
@@ -228,5 +265,7 @@ export component OptionsDialog inherits Window {
                 clicked => { root.ok-clicked(); }
             }
         }
+    }
+
     }
 }

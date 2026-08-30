@@ -38,3 +38,16 @@ options-position-bottom = Снизу
 options-paste-delay-label = Задержка перед вставкой (мс):
 options-restore-clipboard = Восстанавливать содержимое буфера обмена после вставки
 clipboard-history-folder = История буфера обмена
+
+# Delete confirmation, options validation feedback, and the
+# selection dialog's filter/empty states.
+confirm-delete-title = Удалить?
+confirm-delete-folder = Будет безвозвратно удалена эта папка и всё её содержимое:
+confirm-yes = Удалить
+confirm-no = Отмена
+options-error-hotkey-duplicate = Сочетания клавиш должны различаться.
+options-error-hotkey-taken = Это сочетание уже занято другим приложением.
+options-error-hotkey-invalid = Не удалось зарегистрировать это сочетание.
+options-error-save-failed = Настройки применены для текущего сеанса, но не сохранены на диск.
+selection-filter-placeholder = Введите для фильтрации
+selection-empty = Пока нет фрагментов.

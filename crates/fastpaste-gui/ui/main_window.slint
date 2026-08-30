@@ -33,14 +33,30 @@ export component MainWindow inherits Window {
     in-out property <int> current-index: -1;
 
     // Editor pane state.
+    //
+    // Two enables, not one. `editor-enabled` means "this row has an
+    // editable body" (false for folders); `title-enabled` means "this row
+    // is a real, renameable item" (false for clipboard-history rows,
+    // which are a read-only preview). Binding the title field to
+    // `current-index >= 0` let the user type into a history row's title
+    // and watch the text be silently discarded — the exact complaint the
+    // body field was fixed for.
     in-out property <string> editor-title: "";
     in-out property <string> editor-body: "";
     in-out property <bool> editor-enabled: false;
+    in-out property <bool> title-enabled: false;
+
+    // Delete confirmation overlay. `delete-clicked` asks the controller
+    // whether the selection needs confirming; if so it raises this and
+    // waits for `delete-confirmed`.
+    in-out property <bool> confirm-delete-visible: false;
+    in-out property <string> confirm-delete-message: "";
 
     // ---- Toolbar callbacks ----
     callback add-folder-clicked();
     callback add-plain-clicked();
     callback delete-clicked();
+    callback delete-confirmed();
     callback move-up-clicked();
     callback move-down-clicked();
     // ---- Editor callbacks ----
@@ -91,10 +107,12 @@ export component MainWindow inherits Window {
                 }
                 FButton {
                     text: "↑";
+                    accessible-name: Translations.toolbar-move-up;
                     clicked => { root.move-up-clicked(); }
                 }
                 FButton {
                     text: "↓";
+                    accessible-name: Translations.toolbar-move-down;
                     clicked => { root.move-down-clicked(); }
                 }
             }
@@ -113,13 +131,22 @@ export component MainWindow inherits Window {
             tv := TreeView {
                 preferred-width: 320px;
                 model: root.tree-model;
-                current-index: root.current-index;
+                // TWO-WAY (`<=>`), never `:`. The TreeView assigns its own
+                // `current-index` on a row click and in set-current /
+                // move-current; a one-way binding is dropped by the first
+                // such assignment, after which Rust-side
+                // `set_current_index` updates MainWindow's copy while the
+                // highlight stays where it was. Selection and highlight
+                // then disagree — and Delete acts on the selection, so the
+                // user can destroy a row other than the one they see
+                // highlighted, recursively and without confirmation.
+                current-index <=> root.current-index;
                 // Main window is always "focused" — bind to real focus
                 // tracking if you want greyed selection when not frontmost.
                 focused: true;
 
                 current-changed(id) => {
-                    root.current-index = tv.current-index;
+                    // No mirroring needed: `current-index` is aliased above.
                     root.current-changed(id);
                 }
                 item-activated(id) => {
@@ -157,7 +184,7 @@ export component MainWindow inherits Window {
                 }
                 FLineEdit {
                     text <=> root.editor-title;
-                    enabled: root.current-index >= 0;
+                    enabled: root.title-enabled;
                     edited(t) => {
                         root.title-edited(t);
                     }
@@ -172,7 +199,15 @@ export component MainWindow inherits Window {
                 // close enough to the in-house set; Slint exposes no
                 // multiline text primitive to build a custom one).
                 TextEdit {
-                    text: root.editor-body;
+                    // TWO-WAY (`<=>`), never `:` — same hazard as
+                    // `current-index` above, and here it corrupted data.
+                    // TextEdit assigns its own `text` as the user types,
+                    // which drops a one-way binding; from then on
+                    // `set_editor_body` was inert, so selecting another
+                    // item left the previous item's text in the pane and
+                    // the next keystroke wrote it into the newly selected
+                    // row.
+                    text <=> root.editor-body;
                     enabled: root.editor-enabled;
                     edited(b) => {
                         root.body-edited(b);
@@ -180,5 +215,82 @@ export component MainWindow inherits Window {
                 }
             }
         }
+    }
+
+    // ── Delete confirmation ──────────────────────────────────────────
+    // Deleting a folder removes its whole subtree recursively and there
+    // is no undo, so the destructive case asks first. Declared after the
+    // main layout so it paints on top, and it takes focus while up so
+    // Enter/Esc answer it rather than reaching the tree.
+    if root.confirm-delete-visible: Rectangle {
+        background: #00000066;
+
+        // Swallow clicks on the backdrop so nothing behind reacts.
+        TouchArea {}
+
+        Rectangle {
+            width: Math.min(root.width - 40px, 380px);
+            height: card.preferred-height;
+            background: Theme.surface;
+            border-color: Theme.border;
+            border-width: 1px;
+            border-radius: Theme.radius;
+
+            card := VerticalLayout {
+                padding: Theme.padding;
+                spacing: Theme.spacing;
+
+                Text {
+                    text: Translations.confirm-delete-title;
+                    font-size: Theme.font-size;
+                    font-weight: 700;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.confirm-delete-message;
+                    font-size: Theme.font-size;
+                    color: Theme.text;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: Theme.spacing-s;
+                    alignment: end;
+
+                    FButton {
+                        text: Translations.confirm-no;
+                        clicked => { root.confirm-delete-visible = false; }
+                    }
+                    FButton {
+                        text: Translations.confirm-yes;
+                        clicked => {
+                            root.confirm-delete-visible = false;
+                            root.delete-confirmed();
+                        }
+                    }
+                }
+            }
+        }
+
+        confirm-keys := FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.confirm-delete-visible = false;
+                    return accept;
+                }
+                if (event.text == Key.Return) {
+                    root.confirm-delete-visible = false;
+                    root.delete-confirmed();
+                    return accept;
+                }
+                reject
+            }
+        }
+
+        // Grab focus as the overlay appears. `init` is what does the
+        // work — the element only exists while the `if` holds, so its
+        // `visible` is the constant true and a `changed visible` handler
+        // would never fire.
+        init => { confirm-keys.focus(); }
     }
 }

@@ -5,9 +5,9 @@
 //! `build_tree_items_with_history` additionally injects
 //! the virtual "Clipboard History" folder at the top or bottom, populated
 //! from `ClipboardHistory::entries()`. The folder carries
-//! `HISTORY_FOLDER_ID` (-1) so the controller can recognise history items
-//! and route them to the paste-by-history path instead of trying to
-//! fetch them from the DB.
+//! `HISTORY_FOLDER_ID` so the controller can recognise history items and
+//! route them to the paste-by-history path instead of trying to fetch
+//! them from the DB.
 //!
 //! Expansion state: the controller owns a `HashSet<i64>` of collapsed
 //! folder ids (DB rowids plus `HISTORY_FOLDER_ID` for the virtual
@@ -65,9 +65,11 @@ pub fn build_tree_items_with_history(
     }
 
     // Sort each group by order_index (load_all already sorts this way,
-    // but be defensive — the HashMap doesn't preserve order).
+    // but be defensive — the HashMap doesn't preserve order). `id` is the
+    // tie-break, matching `load_all`'s ORDER BY exactly, so siblings that
+    // share a position still come out in a stable, predictable order.
     for children in children_by_parent.values_mut() {
-        children.sort_by_key(|i| i.order_index);
+        children.sort_by_key(|i| (i.order_index, i.id));
     }
 
     let mut items_out = Vec::new();
@@ -90,6 +92,7 @@ pub fn build_tree_items_with_history(
         NO_PARENT,
         &children_by_parent,
         collapsed,
+        &mut HashSet::new(),
         &mut items_out,
     );
     if position == HistoryPosition::Bottom {
@@ -104,9 +107,14 @@ pub fn build_tree_items_with_history(
 /// Folder row: `internal-id = HISTORY_FOLDER_ID`, `depth = 0`,
 /// `has-children` per the actual entry count. Child rows: `depth = 1`,
 /// `item-type = Plain`. Each child's `internal-id` is encoded as
-/// `-(i + 2)` (so child 0 → -2, child 1 → -3, …) — strictly less than
-/// -1, never colliding with `HISTORY_FOLDER_ID` itself or with real DB
-/// rowids (which are ≥1). The controller decodes via
+/// `-(i + 2)` (so child 0 → -2, child 1 → -3, …): clear of real DB
+/// rowids (always ≥ 1), of the root's parent id (0) and of
+/// `slint_tree_view::NO_PARENT` (-1). It cannot reach
+/// `HISTORY_FOLDER_ID` either — that sentinel sits far *below* these ids
+/// at -1000, and `Settings` clamps the ring to 500 entries, so the
+/// lowest id ever minted is -501 (pinned by
+/// `history_entry_ids_cannot_reach_the_folder_sentinel`). The controller
+/// decodes via
 /// `history_index_from_item_id` so it can map a clicked history row back
 /// to an entry without storing a parallel lookup table.
 fn push_history_folder(
@@ -139,7 +147,9 @@ fn push_history_folder(
         let text = collapse_newlines(&text);
         items.push(
             TreeItem::leaf(
-                // -(i+2) keeps it < -1 (below HISTORY_FOLDER_ID) and unique.
+                // -(i+2): unique, and clear of every other sentinel —
+                // real rowids (≥ 1), the root's parent id (0) and
+                // NO_PARENT (-1). See `history_index_from_item_id`.
                 -((i as i32) + 2),
                 HISTORY_FOLDER_ID as i32,
                 1,
@@ -152,22 +162,30 @@ fn push_history_folder(
     }
 }
 
+/// First id used for a history entry. Entry `i` is `-(i + 2)`, so the
+/// ids run -2, -3, … downwards, never touching 0 (the root's parent
+/// sentinel), -1 (`slint_tree_view::NO_PARENT`) or a DB rowid (≥ 1).
+const FIRST_HISTORY_ENTRY_ID: i32 = -2;
+
 /// Decode a Slint tree-item `internal-id` produced by `push_history_folder`
 /// back into an index into the `ClipboardHistory::entries()` vector.
 /// Returns `None` for the folder row itself (`HISTORY_FOLDER_ID`) or any
 /// positive DB rowid.
 ///
+/// The test at the bottom of this module pins the fact that the entry id
+/// range cannot reach `HISTORY_FOLDER_ID`, so this decodes purely from
+/// the `-(i + 2)` encoding rather than treating the sentinel as a
+/// boundary — which is what tied it to the sentinel's exact value.
+///
 /// Used by the Main Window controller to short-circuit a history-item
 /// selection: instead of `db.get(id)` (which would return None), the
 /// controller pastes `entries()[idx].text` directly.
 pub fn history_index_from_item_id(id: i32) -> Option<usize> {
-    if id <= HISTORY_FOLDER_ID as i32 {
-        // -1 is the folder; -2.. are children at idx = -id - 2.
-        if id < HISTORY_FOLDER_ID as i32 {
-            Some((-(id) - 2) as usize)
-        } else {
-            None
-        }
+    if id == HISTORY_FOLDER_ID as i32 {
+        return None; // the folder row itself
+    }
+    if id <= FIRST_HISTORY_ENTRY_ID {
+        Some((-id - 2) as usize)
     } else {
         None
     }
@@ -179,11 +197,30 @@ fn build_subtree(
     parent_internal_id: i32,
     children_by_parent: &std::collections::HashMap<i64, Vec<&Item>>,
     collapsed: &HashSet<i64>,
+    visited: &mut HashSet<i64>,
     out: &mut Vec<TreeItem>,
 ) {
     for item in items {
         let is_folder = item.kind == ItemKind::Folder;
-        let id = item.id.unwrap_or(0);
+        // An id-less row cannot be placed: `unwrap_or(0)` used to map it
+        // onto the root's own child list, which recursed until the stack
+        // ran out. Unreachable through `load_all` (rowids are always
+        // present), but a graceful skip costs nothing and a stack
+        // overflow is not a graceful failure.
+        let Some(id) = item.id else {
+            tracing::warn!("tree: skipping an item with no id ({:?})", item.title);
+            continue;
+        };
+        // Belt and braces against a `parent_id` cycle. Unreachable as
+        // written — `children_by_parent` keys each item by its single
+        // parent, so a descent from the root visits any id at most once —
+        // but the guard costs one hash insert and removes the whole class
+        // of "flattener recursed forever" from consideration. The bug
+        // that was actually reachable is the id-less skip above.
+        if is_folder && !visited.insert(id) {
+            tracing::error!("tree: parent_id cycle at item {id}; not descending further");
+            continue;
+        }
         let children = if is_folder {
             children_by_parent.get(&id).cloned().unwrap_or_default()
         } else {
@@ -226,6 +263,7 @@ fn build_subtree(
                 slint_id,
                 children_by_parent,
                 collapsed,
+                visited,
                 out,
             );
         } else {
@@ -248,7 +286,7 @@ fn build_subtree(
 /// Avoids the "a\r\nb" → "a  b" (two spaces) that a naive char-by-char
 /// replace produces. Used to flatten multi-line clipboard snapshots into
 /// a tidy tree-row label.
-fn collapse_newlines(s: &str) -> String {
+pub(crate) fn collapse_newlines(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut in_run = false;
     for c in s.chars() {
@@ -268,6 +306,131 @@ fn collapse_newlines(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn at(mut item: Item, order_index: i32) -> Item {
+        item.order_index = order_index;
+        item
+    }
+
+    fn titles(rows: &[TreeItem]) -> Vec<String> {
+        rows.iter().map(|r| r.text.to_string()).collect()
+    }
+
+    /// `order_index` decides sibling order. Both existing helpers hardcode
+    /// 0, so the defensive sort in `build_tree_items_with_history` was
+    /// never actually exercised.
+    #[test]
+    fn siblings_are_ordered_by_order_index() {
+        let items = vec![
+            at(plain(1, 0, "third"), 2),
+            at(plain(2, 0, "first"), 0),
+            at(plain(3, 0, "second"), 1),
+        ];
+        let rows = build_tree_items_with_history(
+            &items,
+            &[],
+            HistoryPosition::Bottom,
+            "History",
+            &HashSet::new(),
+        );
+        assert_eq!(titles(&rows[..3]), ["first", "second", "third"]);
+    }
+
+    /// Siblings that share an `order_index` fall back to id order — the
+    /// same tie-break `Database::load_all` uses, so the tree cannot
+    /// disagree with the storage layer about what comes first.
+    #[test]
+    fn tied_order_indexes_break_by_id() {
+        let items = vec![
+            at(plain(9, 0, "later id"), 0),
+            at(plain(4, 0, "earlier id"), 0),
+        ];
+        let rows = build_tree_items_with_history(
+            &items,
+            &[],
+            HistoryPosition::Bottom,
+            "History",
+            &HashSet::new(),
+        );
+        assert_eq!(titles(&rows[..2]), ["earlier id", "later id"]);
+    }
+
+    #[test]
+    fn nested_siblings_are_ordered_too() {
+        let items = vec![
+            folder(1, 0, "folder"),
+            at(plain(2, 1, "b"), 1),
+            at(plain(3, 1, "a"), 0),
+        ];
+        let rows = build_tree_items_with_history(
+            &items,
+            &[],
+            HistoryPosition::Bottom,
+            "History",
+            &HashSet::new(),
+        );
+        assert_eq!(titles(&rows[..3]), ["folder", "a", "b"]);
+    }
+
+    /// A `parent_id` cycle must not recurse forever. `Database::update`
+    /// refuses to create one, but a hand-edited file can still contain
+    /// one and it must not take the process down.
+    #[test]
+    fn a_parent_id_cycle_terminates() {
+        // 1 -> 2 -> 1, plus an unrelated root item that must still render.
+        let items = vec![
+            folder(1, 2, "a"),
+            folder(2, 1, "b"),
+            plain(3, 0, "reachable"),
+        ];
+        let rows = build_tree_items_with_history(
+            &items,
+            &[],
+            HistoryPosition::Bottom,
+            "History",
+            &HashSet::new(),
+        );
+        // The cycle is unreachable from the root, so only the real root
+        // item (plus the history folder) is emitted — and, crucially, we
+        // got here at all.
+        assert!(titles(&rows).contains(&"reachable".to_string()));
+    }
+
+    /// A self-parenting folder reachable from the root: the guard has to
+    /// stop the descent rather than the row being unreachable.
+    #[test]
+    fn a_self_parenting_folder_reachable_from_the_root_terminates() {
+        let mut selfish = folder(1, 0, "selfish");
+        selfish.parent_id = 0;
+        let items = vec![selfish, folder(2, 2, "loop"), plain(3, 1, "child")];
+        let rows = build_tree_items_with_history(
+            &items,
+            &[],
+            HistoryPosition::Bottom,
+            "History",
+            &HashSet::new(),
+        );
+        let t = titles(&rows);
+        assert!(t.contains(&"selfish".to_string()));
+        assert!(t.contains(&"child".to_string()));
+    }
+
+    #[test]
+    fn an_item_without_an_id_is_skipped_not_fatal() {
+        let mut orphan = plain(1, 0, "no id");
+        orphan.id = None;
+        let items = vec![orphan, plain(2, 0, "kept")];
+        let rows = build_tree_items_with_history(
+            &items,
+            &[],
+            HistoryPosition::Bottom,
+            "History",
+            &HashSet::new(),
+        );
+        let t = titles(&rows);
+        assert!(t.contains(&"kept".to_string()));
+        assert!(!t.contains(&"no id".to_string()));
+    }
 
     fn plain(id: i64, parent: i64, title: &str) -> Item {
         Item {
@@ -436,15 +599,39 @@ mod tests {
 
     #[test]
     fn history_item_id_decoder() {
-        // Folder id (-1) → None.
-        assert_eq!(history_index_from_item_id(HISTORY_FOLDER_ID as i32), None,);
+        // The folder row itself → None.
+        assert_eq!(history_index_from_item_id(HISTORY_FOLDER_ID as i32), None);
         // Positive DB rowid → None.
         assert_eq!(history_index_from_item_id(1), None);
         assert_eq!(history_index_from_item_id(42), None);
+        // NO_PARENT and the root sentinel are not history entries.
+        assert_eq!(history_index_from_item_id(NO_PARENT), None);
+        assert_eq!(history_index_from_item_id(0), None);
         // Child ids -2, -3, -4 → 0, 1, 2.
         assert_eq!(history_index_from_item_id(-2), Some(0));
         assert_eq!(history_index_from_item_id(-3), Some(1));
         assert_eq!(history_index_from_item_id(-4), Some(2));
+    }
+
+    /// The entry ids and the folder sentinel share one negative number
+    /// line, so they must not be able to meet. `Settings` clamps
+    /// `max_items` to 500, and entry `i` is `-(i + 2)`, so the lowest id
+    /// ever minted is -501 — far above HISTORY_FOLDER_ID.
+    #[test]
+    fn history_entry_ids_cannot_reach_the_folder_sentinel() {
+        let lowest_entry_id = -(*fastpaste_app::settings::MAX_ITEMS_RANGE.end() as i32 + 1);
+        assert!(
+            lowest_entry_id > HISTORY_FOLDER_ID as i32,
+            "entry ids bottom out at {lowest_entry_id}, which must stay above \
+             HISTORY_FOLDER_ID ({})",
+            HISTORY_FOLDER_ID
+        );
+        // And the encoding never produces the sentinel for any legal index.
+        for i in 0..=*fastpaste_app::settings::MAX_ITEMS_RANGE.end() as usize {
+            let id = -((i as i32) + 2);
+            assert_ne!(id, HISTORY_FOLDER_ID as i32, "index {i} collides");
+            assert_eq!(history_index_from_item_id(id), Some(i));
+        }
     }
 
     /// Folders with children must report `has-children = true`; empty

@@ -37,3 +37,16 @@ options-position-bottom = Abajo
 options-paste-delay-label = Retardo de pegado (ms):
 options-restore-clipboard = Restaurar el contenido del portapapeles después de pegar
 clipboard-history-folder = Historial del portapapeles
+
+# Delete confirmation, options validation feedback, and the
+# selection dialog's filter/empty states.
+confirm-delete-title = ¿Eliminar?
+confirm-delete-folder = Se eliminarán permanentemente esta carpeta y todo su contenido:
+confirm-yes = Eliminar
+confirm-no = Cancelar
+options-error-hotkey-duplicate = Los dos atajos deben ser distintos.
+options-error-hotkey-taken = Ese atajo ya lo usa otra aplicación.
+options-error-hotkey-invalid = No se pudo registrar ese atajo.
+options-error-save-failed = Ajustes aplicados en esta sesión, pero no se pudieron guardar en disco.
+selection-filter-placeholder = Escribe para filtrar
+selection-empty = Aún no hay fragmentos.

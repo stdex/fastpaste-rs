@@ -58,6 +58,16 @@ export global Translations {
     in-out property <string> options-cancel: "Cancel";
     in-out property <string> options-apply: "Apply";
 
+    // Delete confirmation. The message body is composed in Rust (it
+    // names the item), so only the fixed parts live here.
+    in-out property <string> confirm-delete-title: "Delete?";
+    in-out property <string> confirm-yes: "Delete";
+    in-out property <string> confirm-no: "Cancel";
+
+    // Selection dialog filter + empty state.
+    in-out property <string> selection-filter-placeholder: "Type to filter";
+    in-out property <string> selection-empty: "No snippets yet.";
+
     // Virtual tree folder fed by the clipboard history ring buffer
     // (the label lives in the Rust-built tree model, not a binding).
     in-out property <string> clipboard-history-folder: "Clipboard History";

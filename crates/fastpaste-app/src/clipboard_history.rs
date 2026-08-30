@@ -12,7 +12,7 @@
 //! writing, UI thread reading), and the capture flag is an `AtomicBool`
 //! so `set_enabled` doesn't need the lock.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use fastpaste_platform::ClipboardPayload;
@@ -37,7 +37,10 @@ pub struct HistoryEntry {
 /// task and the UI.
 pub struct ClipboardHistory {
     entries: Arc<Mutex<Vec<HistoryEntry>>>,
-    max_items: usize,
+    /// Ring capacity. Atomic rather than fixed so the Options dialog's
+    /// Apply reaches it — the README promises settings are applied live,
+    /// and this was the one field that silently needed a restart.
+    max_items: AtomicUsize,
     enabled: AtomicBool,
 }
 
@@ -48,8 +51,13 @@ impl ClipboardHistory {
     /// `ClipboardHistorySettings::max_items`).
     pub fn new(max_items: usize, enabled: bool) -> Self {
         Self {
-            entries: Arc::new(Mutex::new(Vec::with_capacity(max_items))),
-            max_items,
+            // Not `with_capacity(max_items)`: the bound comes from a
+            // config file, and pre-allocating for a hand-edited
+            // `max_items = 4000000000` is a multi-gigabyte allocation at
+            // startup. `Settings` clamps the value too; this just refuses
+            // to make the size a memory decision at all.
+            entries: Arc::new(Mutex::new(Vec::new())),
+            max_items: AtomicUsize::new(max_items),
             enabled: AtomicBool::new(enabled),
         }
     }
@@ -80,8 +88,22 @@ impl ClipboardHistory {
             return false;
         }
 
-        let mut entries = self.entries.lock().expect("entries mutex poisoned");
+        let max_items = self.max_items.load(Ordering::Acquire);
+        if max_items == 0 {
+            // Nothing can be retained, so report no change rather than
+            // making the caller refresh the tree for an entry that is
+            // discarded on the next line.
+            return false;
+        }
+
+        // A poisoned lock means an earlier panic, not corrupt data — the
+        // critical sections here are short and cannot panic midway.
+        // Recovering beats propagating a panic into a Slint callback,
+        // which would unwind through the event loop and kill the app.
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         // Fast path: identical to newest — pure dedup, no entry added.
+        // (`retain` below would handle it too; the difference is that this
+        // path reports `false`, so the UI does not refresh for a no-op.)
         if entries.first().is_some_and(|e| e.text == payload.text) {
             return false;
         }
@@ -97,8 +119,8 @@ impl ClipboardHistory {
             timestamp: chrono::Utc::now(),
         };
         entries.insert(0, entry);
-        if entries.len() > self.max_items {
-            entries.truncate(self.max_items);
+        if entries.len() > max_items {
+            entries.truncate(max_items);
         }
         true
     }
@@ -107,7 +129,10 @@ impl ClipboardHistory {
     /// callers that need long-lived ownership should consider cloning
     /// only what they render.
     pub fn entries(&self) -> Vec<HistoryEntry> {
-        self.entries.lock().expect("entries mutex poisoned").clone()
+        self.entries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Toggle capture on/off. Does **not** clear existing entries —
@@ -121,10 +146,24 @@ impl ClipboardHistory {
         self.enabled.load(Ordering::Acquire)
     }
 
-    /// Maximum number of entries the buffer will retain. Fixed at
-    /// construction; runtime resizing is not supported.
+    /// Maximum number of entries the buffer will retain.
     pub fn max_items(&self) -> usize {
-        self.max_items
+        self.max_items.load(Ordering::Acquire)
+    }
+
+    /// Resize the ring live, trimming from the oldest end if the new
+    /// bound is smaller than the current contents.
+    ///
+    /// Called from the Options dialog's Apply. Shrinking has to take
+    /// effect immediately, or the list the user sees keeps contradicting
+    /// the number they just set.
+    pub fn set_max_items(&self, max_items: usize) {
+        self.max_items.store(max_items, Ordering::Release);
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if entries.len() > max_items {
+            // Newest-first, so truncation drops the oldest.
+            entries.truncate(max_items);
+        }
     }
 }
 
@@ -281,5 +320,83 @@ mod tests {
         let h = ClipboardHistory::default();
         assert_eq!(h.max_items(), 10);
         assert!(h.enabled());
+    }
+
+    // ---- live resize ----------------------------------------------------
+
+    #[test]
+    fn set_max_items_shrinks_immediately_dropping_the_oldest() {
+        let h = ClipboardHistory::new(10, true);
+        for i in 0..6 {
+            h.on_clipboard_changed(payload(&format!("item{i}")));
+        }
+        // Newest-first: item5 .. item0
+        assert_eq!(h.entries().len(), 6);
+
+        h.set_max_items(3);
+        let entries = h.entries();
+        assert_eq!(entries.len(), 3, "shrinking must take effect at once");
+        let texts: Vec<&str> = entries.iter().map(|e| e.text.as_str()).collect();
+        assert_eq!(texts, ["item5", "item4", "item3"], "the newest survive");
+        assert_eq!(h.max_items(), 3);
+    }
+
+    #[test]
+    fn set_max_items_growing_keeps_existing_entries() {
+        let h = ClipboardHistory::new(2, true);
+        for i in 0..4 {
+            h.on_clipboard_changed(payload(&format!("item{i}")));
+        }
+        assert_eq!(h.entries().len(), 2);
+
+        h.set_max_items(5);
+        assert_eq!(h.entries().len(), 2, "growing discards nothing");
+        for i in 4..7 {
+            h.on_clipboard_changed(payload(&format!("item{i}")));
+        }
+        assert_eq!(h.entries().len(), 5, "and the new bound is honoured");
+    }
+
+    #[test]
+    fn the_new_bound_applies_to_subsequent_inserts() {
+        let h = ClipboardHistory::new(10, true);
+        h.set_max_items(2);
+        for i in 0..5 {
+            h.on_clipboard_changed(payload(&format!("item{i}")));
+        }
+        assert_eq!(h.entries().len(), 2);
+    }
+
+    #[test]
+    fn set_max_items_to_zero_empties_the_ring() {
+        let h = ClipboardHistory::new(5, true);
+        h.on_clipboard_changed(payload("x"));
+        h.set_max_items(0);
+        assert!(h.entries().is_empty());
+    }
+
+    /// With no capacity there is nothing to show, so the caller must not
+    /// be told to refresh the tree for an entry that is discarded on the
+    /// very next line.
+    #[test]
+    fn zero_capacity_reports_no_change() {
+        let h = ClipboardHistory::new(0, true);
+        assert!(!h.on_clipboard_changed(payload("x")));
+        assert!(h.entries().is_empty());
+    }
+
+    #[test]
+    fn resize_is_visible_from_another_thread() {
+        use std::sync::Arc;
+        let h = Arc::new(ClipboardHistory::new(10, true));
+        for i in 0..5 {
+            h.on_clipboard_changed(payload(&format!("item{i}")));
+        }
+        let h2 = Arc::clone(&h);
+        std::thread::spawn(move || h2.set_max_items(2))
+            .join()
+            .unwrap();
+        assert_eq!(h.entries().len(), 2);
+        assert_eq!(h.max_items(), 2);
     }
 }

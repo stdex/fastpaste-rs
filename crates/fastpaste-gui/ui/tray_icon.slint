@@ -18,10 +18,8 @@
 //
 // The icon image is referenced via `@image-url("...")` and resolved by
 // the build script. Slint's `slint_build::compile` looks up assets in
-// the same directory tree as the .slint file; the binary lives at
-// `ui/assets/tray.png`. Until we ship a real PNG we omit `icon:` —
-// the tray still works (the platform draws a default), and the visible
-// affordance is the tooltip. A TODO comment marks the asset wiring.
+// the same directory tree as the .slint file; the icon lives at
+// `ui/assets/tray.png` and is baked into the binary at compile time.
 
 import { Translations } from "translations.slint";
 

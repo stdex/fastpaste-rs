@@ -1,5 +1,14 @@
 //! Data model: snippets and folders.
-//! The central value type that crosses all layers. Plain copyable struct.
+//!
+//! [`Item`] is the central value type that crosses all layers: a plain
+//! `Clone` struct with no behaviour of its own (it owns `String`s, so it is
+//! not `Copy`).
+//!
+//! [`HistoryPosition`] and [`HISTORY_FOLDER_ID`] describe the virtual
+//! Clipboard History folder rather than anything stored here. They live in
+//! this crate deliberately — they are shared vocabulary that `app` (which
+//! deserializes the setting) and `gui` (which draws the folder) must agree
+//! on, and this is the only crate both already depend on.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -41,6 +50,12 @@ pub struct Item {
     pub body_plain: String,
     /// Always `None` in v1 (RTF is out of scope). Kept for forward-compat
     /// so adding RTF later doesn't break the schema or the type.
+    ///
+    /// The column is `NOT NULL DEFAULT ''`, so the storage mapping is
+    /// asymmetric: `None` writes `''` and `''` reads back as `None`. A
+    /// deliberate `Some(String::new())` therefore round-trips to `None`.
+    /// Make the column nullable in a future migration if that distinction
+    /// ever has to survive.
     pub body_rtf: Option<String>,
     pub comment: String,
     /// `-1` means "append on insert"; ≥0 after insert.
@@ -88,8 +103,14 @@ impl Item {
 }
 
 /// Sentinel for the virtual "Clipboard History" folder. DB rowids are always
-/// ≥1, so collisions are impossible. Mirror of C++ `kHistoryFolderId`.
-pub const HISTORY_FOLDER_ID: i64 = -1;
+/// ≥1, so collisions with real items are impossible.
+///
+/// Deliberately **not** `-1`: `slint_tree_view::NO_PARENT` is `-1`, and the
+/// GUI passes this value through as a `TreeItem::parent_internal_id`, where
+/// `-1` would be read as "root-level, no parent". Kept clear of the
+/// `-(index + 2)` ids the GUI mints for individual history entries too,
+/// which `Settings` clamps well below 1000 entries.
+pub const HISTORY_FOLDER_ID: i64 = -1000;
 
 /// Where the virtual Clipboard History folder sits in the tree.
 ///
@@ -134,9 +155,12 @@ mod tests {
     }
 
     #[test]
-    fn history_folder_id_is_negative() {
-        // Sanity: must not collide with DB rowids (which are ≥1).
-        const { assert!(HISTORY_FOLDER_ID < 0) }
+    fn history_folder_id_is_clear_of_every_other_sentinel() {
+        // Must not collide with DB rowids (always ≥ 1), with the root's
+        // parent id (0), or with `slint_tree_view::NO_PARENT` (-1) — the
+        // last of which is the collision this constant was moved for, and
+        // which `< 0` alone would not have caught.
+        const { assert!(HISTORY_FOLDER_ID < -1) }
     }
 
     #[test]

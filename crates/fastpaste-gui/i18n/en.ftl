@@ -44,3 +44,16 @@ options-position-bottom = Bottom
 options-paste-delay-label = Paste delay (ms):
 options-restore-clipboard = Restore clipboard contents after pasting
 clipboard-history-folder = Clipboard History
+
+# Delete confirmation, options validation feedback, and the
+# selection dialog's filter/empty states.
+confirm-delete-title = Delete?
+confirm-delete-folder = This will permanently delete this folder and everything inside it:
+confirm-yes = Delete
+confirm-no = Cancel
+options-error-hotkey-duplicate = The two shortcuts must be different.
+options-error-hotkey-taken = That shortcut is already used by another application.
+options-error-hotkey-invalid = That shortcut could not be registered.
+options-error-save-failed = Settings applied for this session, but could not be saved to disk.
+selection-filter-placeholder = Type to filter
+selection-empty = No snippets yet.

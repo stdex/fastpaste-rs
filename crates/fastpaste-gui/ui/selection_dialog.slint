@@ -1,11 +1,12 @@
 // Selection dialog: the hotkey popup listing snippets with keyboard
-// navigation (Up/Down/Enter/Esc). The Rust side sets the `snippets`
-// model and wires `paste-selected` / `closed` callbacks.
+// navigation. The Rust side sets the `snippets` model and wires
+// `paste-selected` / `closed` / `filter-changed` callbacks.
 //
-// Notes on keyboard handling: in Slint, only `FocusScope` (and `TextInput`)
-// declare the `key-pressed` callback. So the dialog wraps its content in a
-// `FocusScope` and the `Window` forwards focus to it. (`Rectangle`, `Text`,
-// `TouchArea`, `FocusScope` are builtins; only `ListView` is a widget.)
+// Notes on keyboard handling: in Slint, only `FocusScope` (and
+// `TextInput`) declare the `key-pressed` callback. The filter field is a
+// `TextInput`, so it takes focus and forwards the navigation keys it does
+// not consume itself; that way typing filters and the arrows still move
+// the selection, without the user having to think about focus at all.
 //
 // Rows are two-line (title + first line of the body) so the user can tell
 // snippets apart without opening them.
@@ -29,80 +30,225 @@ export component SelectionDialog inherits Window {
     preferred-height: 340px;
     background: Theme.surface;
 
-    // List of snippets, set from Rust.
+    // List of snippets, set from Rust (already filtered).
     in-out property <[SnippetRow]> snippets;
 
     // Currently-selected index (clamped to 0 from Rust at show time).
     in-out property <int> selected-index: 0;
 
+    // The live filter text. Rust owns the filtering so the index the
+    // paste callback receives always refers to the list on screen.
+    in-out property <string> filter-text: "";
+
     // Emitted when the user picks a snippet (Enter or double-click).
     callback paste-selected(int /* index */);
     // Emitted when the user closes the dialog (Esc).
     callback closed();
+    // Emitted on every filter keystroke; Rust re-populates `snippets`.
+    callback filter-changed(string);
 
-    // The Window forwards keyboard focus to this scope; key events arrive
-    // here when the dialog has focus.
-    forward-focus: key-scope;
+    // Height of one row, used to scroll the selection into view.
+    property <length> row-height: 42px;
 
-    key-scope := FocusScope {
-        key-pressed(event) => {
-            if event.text == Key.UpArrow {
-                if root.selected-index > 0 {
-                    root.selected-index -= 1;
-                }
-                accept
-            } else if event.text == Key.DownArrow {
-                if root.selected-index < root.snippets.length - 1 {
-                    root.selected-index += 1;
-                }
-                accept
-            } else if event.text == Key.Return {
-                root.paste-selected(root.selected-index);
-                accept
-            } else if event.text == Key.Escape {
-                root.closed();
-                accept
-            } else {
-                reject
-            }
+    // Rows per PageUp/PageDown — a screenful, so it still matches after
+    // the window is resized.
+    property <int> page-rows: Math.max(1, Math.floor(list.visible-height / root.row-height));
+
+    forward-focus: filter;
+
+    // Move the selection by `delta`, wrapping at both ends, and keep it
+    // on screen. Wrapping matters for a short keyboard-driven list: with
+    // 3 snippets, Up from the first should reach the last rather than do
+    // nothing.
+    function move-selection(delta: int) {
+        if (root.snippets.length == 0) {
+            return;
+        }
+        root.selected-index =
+            Math.mod(root.selected-index + delta + root.snippets.length,
+                     root.snippets.length);
+        root.scroll-into-view();
+    }
+
+    // Called from Rust after the model is repopulated (a filter
+    // keystroke, or reopening the dialog). Setting `selected-index` from
+    // Rust does not run `set-selection`, so without this the selection
+    // snapped to the top while the viewport stayed scrolled where it was
+    // — the highlighted row off-screen, which is the symptom the
+    // scroll-into-view work existed to remove.
+    public function reset-view() {
+        root.selected-index = 0;
+        list.viewport-y = 0;
+    }
+
+    function set-selection(i: int) {
+        if (root.snippets.length == 0) {
+            return;
+        }
+        root.selected-index = Math.max(0, Math.min(root.snippets.length - 1, i));
+        root.scroll-into-view();
+    }
+
+    // Keep the selected row inside the viewport. `ListView` does not
+    // follow a manually-tracked index, so without this the selection
+    // walked straight off the bottom of the window and the user was
+    // navigating blind past ~7 rows.
+    function scroll-into-view() {
+        if (root.selected-index * root.row-height < -list.viewport-y) {
+            list.viewport-y = -root.selected-index * root.row-height;
+        } else if ((root.selected-index + 1) * root.row-height
+                   > -list.viewport-y + list.visible-height) {
+            list.viewport-y =
+                list.visible-height - (root.selected-index + 1) * root.row-height;
         }
     }
 
-    ListView {
-        for snippet[i] in root.snippets: Rectangle {
-            height: 42px;
-            background: i == root.selected-index
-                ? Theme.selection-bg
-                : touch.has-hover ? Theme.hover-bg : transparent;
+    VerticalLayout {
+        // ── Filter ───────────────────────────────────────────────────
+        Rectangle {
+            height: Theme.control-height + 12px;
+            background: Theme.surface;
 
-            VerticalLayout {
-                padding: Theme.spacing-s;
-                padding-left: 10px;
-                padding-right: 10px;
-                alignment: start;
+            Rectangle {
+                x: 8px;
+                y: 6px;
+                width: parent.width - 16px;
+                height: Theme.control-height;
+                background: Theme.surface;
+                border-color: filter.has-focus ? Theme.accent : Theme.border;
+                border-width: 1px;
+                border-radius: Theme.radius;
 
-                Text {
-                    text: snippet.title;
+                if root.filter-text == "": Text {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: 100%;
+                    vertical-alignment: center;
+                    text: Translations.selection-filter-placeholder;
                     font-size: Theme.font-size;
-                    font-weight: i == root.selected-index ? 600 : 400;
-                    color: i == root.selected-index
-                        ? Theme.selection-fg : Theme.text;
-                    overflow: elide;
-                }
-                Text {
-                    text: snippet.body;
-                    font-size: Theme.font-size-s;
                     color: Theme.text-muted;
                     overflow: elide;
                 }
+
+                filter := TextInput {
+                    x: 8px;
+                    width: parent.width - 16px;
+                    height: 100%;
+                    vertical-alignment: center;
+                    font-size: Theme.font-size;
+                    color: Theme.text;
+                    single-line: true;
+                    text <=> root.filter-text;
+
+                    edited => {
+                        root.filter-changed(self.text);
+                    }
+                    // Navigation keys are forwarded rather than consumed,
+                    // so the user never has to leave the filter field.
+                    key-pressed(event) => {
+                        if (event.text == Key.UpArrow) {
+                            root.move-selection(-1);
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow) {
+                            root.move-selection(1);
+                            return accept;
+                        }
+                        if (event.text == Key.PageUp) {
+                            root.move-selection(-root.page-rows);
+                            return accept;
+                        }
+                        if (event.text == Key.PageDown) {
+                            root.move-selection(root.page-rows);
+                            return accept;
+                        }
+                        if (event.text == Key.Home && self.text == "") {
+                            root.set-selection(0);
+                            return accept;
+                        }
+                        if (event.text == Key.End && self.text == "") {
+                            root.set-selection(root.snippets.length - 1);
+                            return accept;
+                        }
+                        if (event.text == Key.Return) {
+                            if (root.snippets.length > 0) {
+                                root.paste-selected(root.selected-index);
+                            }
+                            return accept;
+                        }
+                        if (event.text == Key.Escape) {
+                            root.closed();
+                            return accept;
+                        }
+                        reject
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        // ── List (with the empty state layered over it) ──────────────
+        // The ListView is unconditional: `scroll-into-view` above refers
+        // to it by id, and an element declared inside an `if` is not in
+        // scope there.
+        Rectangle {
+            vertical-stretch: 1;
+
+            if root.snippets.length == 0: Text {
+                width: 100%;
+                height: 100%;
+                text: Translations.selection-empty;
+                font-size: Theme.font-size;
+                color: Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+                wrap: word-wrap;
             }
 
-            touch := TouchArea {
-                clicked => {
-                    root.selected-index = i;
-                }
-                double-clicked => {
-                    root.paste-selected(i);
+            list := ListView {
+                width: 100%;
+                height: 100%;
+
+                for snippet[i] in root.snippets: Rectangle {
+                    height: root.row-height;
+                    background: i == root.selected-index
+                        ? Theme.selection-bg
+                        : touch.has-hover ? Theme.hover-bg : transparent;
+
+                    VerticalLayout {
+                        padding: Theme.spacing-s;
+                        padding-left: 10px;
+                        padding-right: 10px;
+                        alignment: start;
+
+                        Text {
+                            text: snippet.title;
+                            font-size: Theme.font-size;
+                            font-weight: i == root.selected-index ? 600 : 400;
+                            color: i == root.selected-index
+                                ? Theme.selection-fg : Theme.text;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: snippet.body;
+                            font-size: Theme.font-size-s;
+                            color: Theme.text-muted;
+                            overflow: elide;
+                        }
+                    }
+
+                    touch := TouchArea {
+                        clicked => {
+                            root.selected-index = i;
+                        }
+                        double-clicked => {
+                            root.paste-selected(i);
+                        }
+                    }
                 }
             }
         }

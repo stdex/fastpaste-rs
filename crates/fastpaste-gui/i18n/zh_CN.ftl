@@ -37,3 +37,16 @@ options-position-bottom = 底部
 options-paste-delay-label = 粘贴延迟（毫秒）：
 options-restore-clipboard = 粘贴后恢复剪贴板内容
 clipboard-history-folder = 剪贴板历史
+
+# Delete confirmation, options validation feedback, and the
+# selection dialog's filter/empty states.
+confirm-delete-title = 删除？
+confirm-delete-folder = 将永久删除此文件夹及其全部内容：
+confirm-yes = 删除
+confirm-no = 取消
+options-error-hotkey-duplicate = 两个快捷键必须不同。
+options-error-hotkey-taken = 该快捷键已被其他应用占用。
+options-error-hotkey-invalid = 无法注册该快捷键。
+options-error-save-failed = 设置已在本次会话生效，但未能保存到磁盘。
+selection-filter-placeholder = 输入以筛选
+selection-empty = 还没有片段。

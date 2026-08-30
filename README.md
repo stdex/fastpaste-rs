@@ -7,13 +7,22 @@ X11 sessions are not supported.
 
 ## Features
 
-- Main window: snippet/folder tree (CRUD) with an editor pane and toolbar
-- Selection dialog: keyboard-driven quick-paste popup
+- Main window: snippet/folder tree (CRUD) with an editor pane and toolbar.
+  Double-click or Enter on a row pastes it. Deleting a folder — which
+  removes its whole subtree, with no undo — asks first
+- Selection dialog: keyboard-driven quick-paste popup over the clipboard
+  history *and* the snippet library, with type-to-filter and wrapping
+  arrow-key navigation. PageUp/PageDown move by a screenful; Home/End
+  jump to the ends while the filter box is empty (once you have typed a
+  filter they move the text cursor instead)
 - Options dialog: general / hotkeys / clipboard-history / paste settings,
-  applied live (hotkey changes re-register immediately)
+  applied live (hotkey changes re-register immediately). A rejected
+  hotkey is reported in the dialog and leaves the other changes intact
 - Global hotkeys (defaults, configurable): `Ctrl+U` → selection dialog,
   `Ctrl+Shift+U` → main window; layout-independent physical-keycode grabs
-  that work under any keyboard layout
+  that work under any keyboard layout. Letters, digits, `F1`-`F12`, and
+  named keys (`Space`, `Tab`, `Esc`, `Home`, arrows, punctuation…) are
+  accepted, with at least one modifier
 - Clipboard history folder: bounded ring populated by watching the system
   clipboard (wlr-data-control), rendered as a virtual folder in the tree
 - Paste via `/dev/uinput` Ctrl+V emulation, with the previous clipboard
@@ -21,6 +30,18 @@ X11 sessions are not supported.
 - System tray icon with context menu (Slint native `SystemTrayIcon`)
 - Localization: English, Russian, German, Spanish, Simplified Chinese
 - Single-instance guard (abstract unix socket, kernel-released on exit)
+
+### Degraded modes
+
+The app starts and stays useful when a piece of the desktop is missing:
+
+| Missing | Effect |
+|---|---|
+| `/dev/uinput` | Paste puts the payload on the clipboard and leaves it there for a manual Ctrl+V; nothing else changes |
+| XWayland / X connection | Global hotkeys do not fire. The tray, main window and clipboard history all still work. A connection that drops later is reconnected automatically (up to 5 attempts, 500 ms apart), replaying the registered grabs; past that the hotkeys are inert until the app is restarted |
+| System tray | The app quits when the main window is closed, rather than staying resident with no way to reach it |
+| A readable `config.toml` | The unreadable file is moved to `config.toml.bak` and defaults are used, rather than failing to start |
+| A decodable database row | The row is skipped and logged; the rest of the library still loads |
 
 ## Build prerequisites (Linux)
 
@@ -58,8 +79,13 @@ not only through `app`):
 No GUI, no platform code, no I/O beyond SQLite.
 
 - `item.rs` — `Item` / `ItemKind`: the snippet/folder value type that
-  crosses all layers (plain copyable struct, serde + chrono timestamps)
-- `database.rs` — `Database`: SQLite CRUD for items and folders
+  crosses all layers (a plain `Clone` struct — it owns `String`s, so not
+  `Copy` — with serde + chrono timestamps)
+- `database.rs` — `Database`: SQLite CRUD for items and folders. Owns the
+  tree invariant: `update` / `move_to_parent` reject a `parent_id` that
+  is the item itself, one of its own descendants, or a row that does not
+  exist, and every recursive query uses `UNION` so a cycle that reached
+  the file some other way still terminates
 - `error.rs` — `DataError`, the layer's error enum
 - `migrations/` — refinery SQL migrations (`V001__initial_schema.sql`)
 
@@ -69,10 +95,16 @@ Everything that touches the OS/desktop environment:
 
 - `hotkey.rs` — `GlobalHotkey` trait + `X11GlobalHotkey` (XGrabKey on the
   XWayland root window, layout-independent physical keycodes), and the
-  `OPEN_DIALOG_ID` / `OPEN_MAIN_WINDOW_ID` action ids
+  `OPEN_DIALOG_ID` / `OPEN_MAIN_WINDOW_ID` action ids. The reader thread
+  owns the X connection, reconnects when the server goes away, and exits
+  cleanly when the backend is dropped. Registering one id never disturbs
+  another's live grab, so the two shortcuts can be swapped in one apply
 - `clipboard.rs` — `Clipboard` trait + `ArboardClipboard` (read/write via
   data-control) and the `wl-clipboard-watch`-based change watcher with an
-  arboard-polling fallback
+  arboard-polling fallback. Own writes are announced by *content* with a
+  short TTL (`suppress_text`), so an announced write that never lands —
+  or that the polling fallback never observes — expires instead of
+  swallowing the user's next real copy
 - `uinput.rs` — `EvdevUinputCtrlV` / `NullUinputCtrlV`: `/dev/uinput`
   Ctrl+V emulation, degrading gracefully when the device is unavailable
 - `take_once.rs` — `TakeOnceChannel`, a one-shot hand-off primitive used
@@ -83,13 +115,22 @@ Everything that touches the OS/desktop environment:
 Orchestrates data + platform into long-lived services:
 
 - `context.rs` — `AppContext`: composition root bundling every service
-  behind `Arc` for the UI controllers, plus the single-instance guard
+  behind `Arc` for the UI controllers, plus the single-instance guard —
+  acquired first, before the database is opened or any device claimed.
+  `AppContext::new` takes the services directly (the seam the tests use);
+  `build` is the production wrapper that resolves XDG paths and opens the
+  real backends. `set_settings` owns the "every field applies live"
+  contract
 - `settings.rs` — `Settings`: typed `config.toml` load/save (confy),
   grouped into general / hotkeys / clipboard-history / paste sections
 - `clipboard_history.rs` — `ClipboardHistory`: the bounded ring fed by the
-  clipboard watcher, exposed as a virtual folder
-- `paster.rs` — `Paster`: the paste sequence (set clipboard → delay →
-  Ctrl+V via uinput → restore previous clipboard)
+  clipboard watcher, exposed as a virtual folder. `max_items` resizes
+  live, trimming from the oldest end
+- `paster.rs` — `Paster`: the paste sequence (snapshot → set clipboard →
+  delay → Ctrl+V via uinput → restore). Whole sequences are serialised,
+  the restore runs even when the keystroke fails, and it is skipped when
+  no keystroke was sent at all (so the manual-Ctrl+V fallback has
+  something left to paste)
 - `paths.rs` — single source of truth for XDG `config_dir` / `data_dir`
 
 ### `fastpaste-gui` — Slint frontend (binary `fastpaste-gui`)
@@ -105,7 +146,13 @@ Orchestrates data + platform into long-lived services:
 - `src/i18n.rs` — fluent runtime (embedded `.ftl`, per-locale fallback,
   live language switch)
 - `src/main.rs` — controllers wiring Slint callbacks/hotkey events to
-  `AppContext`
+  `AppContext`. Editor changes are debounced (~300 ms) into one write
+  instead of one per keystroke, and flushed on selection change and on
+  close; the editor is seeded from the database rather than the tree
+  model, which lags a rename
+- `src/ui_state.rs` — thread-local keep-alive slots for the windows and
+  the tray. `hide()` drops the only other strong handle, so without these
+  a hidden window would be freed and rebuilt on every reopen
 - `build.rs` — `slint_build` compilation of the `.slint` files
 
 ## Data & configuration
@@ -129,19 +176,26 @@ open_main_window = "Ctrl+Shift+U"
 
 [clipboard_history]
 enabled = true
-max_items = 10
+max_items = 10               # clamped to 1..=500
 position = "bottom"          # "top" | "bottom"
 
 [paste]
-delay_ms = 70                # pause between clipboard set and Ctrl+V
+delay_ms = 70                # pause between clipboard set and Ctrl+V; clamped to 0..=5000
 restore_clipboard = true     # put the previous clipboard back after paste
 ```
 
+Numeric values are clamped to the ranges above on load, so a hand-edited
+typo cannot turn into a failed allocation or a wedged paste worker. A
+file that cannot be parsed at all is moved aside to `config.toml.bak`
+and defaults are used — the app never fails to start over its config.
+
 ## Dependencies
 
-Shared versions are pinned in the workspace root `Cargo.toml`
-(`[workspace.dependencies]`); each crate pulls from there via
-`dependency.workspace = true`.
+Versions used by more than one crate are pinned in the workspace root
+`Cargo.toml` (`[workspace.dependencies]`) and pulled in via
+`dependency.workspace = true`. Single-consumer dependencies
+(`rusqlite`, `refinery`, `directories`, `confy`, `single-instance`, …)
+are pinned in the crate that owns them.
 
 | Crate | Used by | Purpose |
 |---|---|---|

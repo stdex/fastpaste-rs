@@ -11,6 +11,14 @@ pub enum DataError {
     #[error("cannot update an item that has no id")]
     MissingId,
 
+    #[error("no item with id {0}")]
+    ItemNotFound(i64),
+
+    /// A `parent_id` that would break the tree invariant: the item itself,
+    /// one of its own descendants (a cycle), or a row that does not exist.
+    #[error("item {id} cannot have parent {parent_id}")]
+    InvalidParent { id: i64, parent_id: i64 },
+
     #[error("corrupt schema (found {found:?}, expected {expected})")]
     CorruptSchema { found: Option<u32>, expected: u32 },
 
