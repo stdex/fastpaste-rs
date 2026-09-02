@@ -36,4 +36,10 @@ pub enum DataError {
     /// separately so it does not masquerade as corruption.
     #[error("database is encrypted, but this build has no SQLCipher support")]
     EncryptedButUnsupported,
+
+    /// The supplied passphrase did not decrypt the file — or no passphrase
+    /// was supplied for a file that needs one. Indistinguishable from
+    /// "this was never a database", which is why the message says both.
+    #[error("wrong passphrase, or not a fastpaste database")]
+    WrongPassphrase,
 }

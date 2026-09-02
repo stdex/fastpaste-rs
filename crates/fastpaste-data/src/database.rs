@@ -29,14 +29,27 @@ pub struct Database {
 }
 
 impl Database {
-    /// Open (and create if necessary) the database at `path`. When `read_only`
-    /// is true and the file doesn't exist, returns `DataError::NotFound`.
+    /// Open (and create if necessary) the database at `path`. Equivalent to
+    /// [`Self::open_with_key`] with no key: for a plaintext database, or
+    /// for creating one.
+    pub fn open(path: &Path, read_only: bool) -> Result<Self, DataError> {
+        Self::open_with_key(path, read_only, None)
+    }
+
+    /// Open (and create if necessary) the database at `path`, decrypting
+    /// with `key`. When `read_only` is true and the file doesn't exist,
+    /// returns `DataError::NotFound`. A key that does not decrypt the file
+    /// returns `DataError::WrongPassphrase`.
     ///
     /// Note this touches the filesystem (`create_dir_all`) despite the
     /// crate's "no I/O beyond SQLite" rule. It is a deliberate convenience
     /// so a caller cannot get a confusing SQLite "unable to open" for a
     /// missing directory; the app layer creates the same directory first.
-    pub fn open(path: &Path, read_only: bool) -> Result<Self, DataError> {
+    pub fn open_with_key(
+        path: &Path,
+        read_only: bool,
+        key: Option<&secrecy::SecretString>,
+    ) -> Result<Self, DataError> {
         if read_only && !path.exists() {
             return Err(DataError::NotFound(path.to_path_buf()));
         }
@@ -44,12 +57,12 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
 
-        let flags = if read_only {
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-        } else {
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE
-        };
-        let mut conn = Connection::open_with_flags(path, flags)?;
+        // Opens the connection and applies `PRAGMA key` before anything
+        // else touches it: SQLCipher requires it first, and a wrong key
+        // must fail here rather than inside the migration runner, whose
+        // errors describe schema problems and would send the reader
+        // somewhere useless.
+        let mut conn = crate::crypto::open_keyed(path, read_only, key)?;
 
         // Guard *before* running migrations. A database written by a newer
         // build must be refused with `CorruptSchema`; handing it to the
