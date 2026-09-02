@@ -49,13 +49,15 @@ cargo check --target x86_64-pc-windows-gnu -p fastpaste-platform
 
 That covers the crate where the platform code lives, and it is worth
 running for any change to it. The rest of the workspace **cannot** be
-checked this way without a C cross-compiler: `rusqlite`'s `bundled`
-feature builds SQLite from source, so `-p fastpaste-data` and anything
-downstream needs mingw (`x86_64-w64-mingw32-gcc`) installed.
+checked this way without a C cross-compiler and a working OpenSSL
+build: `rusqlite`'s `bundled-sqlcipher-vendored-openssl` feature builds
+both SQLite and OpenSSL from source, so `-p fastpaste-data` and
+anything downstream needs mingw (`x86_64-w64-mingw32-gcc`) plus perl
+and NASM.
 
-Nothing Windows can be *run* here at all. Treat Win32 code as
-type-checked and no more — the first real build on Windows is where its
-runtime behaviour gets tested for the first time.
+In practice, do not try. The `windows` job in `.github/workflows/ci.yml`
+builds and tests the whole workspace on a real Windows runner, and that
+is the check that counts. Nothing Windows can be *run* here at all.
 
 ## Everyday commands
 

@@ -1,0 +1,85 @@
+name: CI
+
+# The app is Linux-only in v1 (evdev, wl-clipboard-watch, XGrabKey on
+# XWayland), so CI runs on Linux only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel any in-flight run when a new commit lands on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: rustfmt check
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Slint (winit) needs the fontconfig/xkb stack; the software
+      # renderer avoids needing a GPU in CI.
+      - name: Install Linux deps for Slint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libfontconfig1-dev libinput-dev \
+            libxcb1-dev libxrandr-dev libx11-dev libegl-dev libgles2-mesa-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy --all-targets --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux deps for Slint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libfontconfig1-dev libinput-dev \
+            libxcb1-dev libxrandr-dev libx11-dev libegl-dev libgles2-mesa-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace
+        run: cargo test --workspace --all-targets --no-fail-fast
+
+  windows:
+    name: windows build + test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # openssl-src assembles OpenSSL with NASM on Windows. Strawberry
+      # Perl is already on the runner image; NASM is not.
+      - name: Install NASM
+        run: choco install nasm -y
+      - name: Add NASM to PATH
+        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      - uses: Swatinem/rust-cache@v2
+      - name: build
+        run: cargo build --workspace
+      - name: test
+        run: cargo test --workspace

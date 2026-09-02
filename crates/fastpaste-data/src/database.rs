@@ -582,6 +582,7 @@ fn row_to_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
     use tempfile::TempDir;
 
     #[test]
@@ -1453,5 +1454,25 @@ mod tests {
         let loaded = db.get(item.id.unwrap()).unwrap().unwrap();
         assert_eq!(loaded.body_plain.len(), body.len());
         assert_eq!(loaded.body_plain, body);
+    }
+
+    /// The whole feature rests on this: a plain `bundled` build answers
+    /// `PRAGMA cipher_version` with nothing at all. If this ever goes
+    /// quiet again, every database in the field silently stops being
+    /// encrypted, so it is worth one test.
+    #[test]
+    fn the_build_actually_links_sqlcipher() {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(&dir.path().join("t.sqlite"), false).unwrap();
+        let version: Option<String> = db
+            .conn
+            .query_row("PRAGMA cipher_version", [], |r| r.get(0))
+            .optional()
+            .unwrap();
+        let version = version.unwrap_or_default();
+        assert!(
+            !version.is_empty(),
+            "no SQLCipher in this build: PRAGMA cipher_version returned {version:?}"
+        );
     }
 }

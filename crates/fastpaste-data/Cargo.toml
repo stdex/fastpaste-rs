@@ -5,7 +5,12 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-rusqlite = { version = "0.37", features = ["bundled", "chrono"] }
+# SQLCipher, not plain SQLite: whole-file page encryption, keyed with
+# `PRAGMA key`. `bundled-sqlcipher` implies `bundled`, so this replaces
+# rather than joins the old feature. `-vendored-openssl` builds OpenSSL
+# from source, which is what keeps this working on a machine that has no
+# system libcrypto — at the cost of a slower cold build.
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl", "chrono"] }
 refinery = { version = "0.9", features = ["rusqlite"] }
 serde.workspace = true
 chrono.workspace = true
