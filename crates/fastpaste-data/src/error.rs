@@ -42,4 +42,10 @@ pub enum DataError {
     /// "this was never a database", which is why the message says both.
     #[error("wrong passphrase, or not a fastpaste database")]
     WrongPassphrase,
+
+    /// A conversion produced a file with a different number of items than
+    /// it started with. The original is left in place and the partial
+    /// file is deleted.
+    #[error("conversion lost rows (expected {expected}, got {got}); the original is untouched")]
+    ConversionMismatch { expected: i64, got: i64 },
 }

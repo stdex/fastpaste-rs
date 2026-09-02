@@ -1,7 +1,7 @@
 //! SQLCipher key application and whole-file conversion.
 //!
 //! Everything that knows a passphrase exists lives here. `database.rs`
-//! calls [`apply_key`] and otherwise stays ignorant of encryption.
+//! calls [`open_keyed`] and otherwise stays ignorant of encryption.
 
 use std::path::Path;
 
@@ -116,12 +116,151 @@ pub(crate) fn open_keyed(
     Ok(conn)
 }
 
+/// Where a conversion writes before it commits by rename. Beside the
+/// original, so the rename stays on one filesystem and is therefore
+/// atomic.
+fn conversion_temp_path(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".new");
+    std::path::PathBuf::from(name)
+}
+
+fn item_count(conn: &Connection) -> Result<i64, DataError> {
+    Ok(conn.query_row("SELECT count(*) FROM items", [], |r| r.get(0))?)
+}
+
+/// Copy every page of `conn`'s main schema into a fresh database at
+/// `dest`, keyed with `key` (`None` writes plaintext).
+///
+/// `sqlcipher_export` is the only supported way to change a database's
+/// encryption: SQLCipher cannot rewrite a file in place, because the
+/// header itself is part of what changes. It copies the whole schema,
+/// `refinery_schema_history` included, so migration state survives.
+fn export_to(conn: &Connection, dest: &Path, key: Option<&SecretString>) -> Result<(), DataError> {
+    let dest_str = dest.to_string_lossy().to_string();
+    // An empty key means "plaintext" to ATTACH — that is the documented
+    // way back out, not an oversight.
+    let key_str = key
+        .map(|k| k.expose_secret().to_string())
+        .unwrap_or_default();
+
+    conn.execute(
+        "ATTACH DATABASE ?1 AS target KEY ?2",
+        rusqlite::params![dest_str, key_str],
+    )?;
+    let exported = conn.query_row("SELECT sqlcipher_export('target')", [], |_| Ok(()));
+    // Detach whatever happened, so a failed export cannot leave the
+    // connection holding the partial file open.
+    let detached = conn.execute("DETACH DATABASE target", []);
+    exported?;
+    detached?;
+    Ok(())
+}
+
+/// Best-effort durability before the rename that commits a conversion.
+fn fsync_file(path: &Path) -> Result<(), DataError> {
+    std::fs::File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+/// Rewrite the database at `path` from key `from` to key `to`.
+///
+/// Never touches the original until the replacement has been opened under
+/// its new key and confirmed to hold the same number of items. A crash at
+/// any point before the rename leaves the original intact and an orphaned
+/// `.new` beside it, which [`clean_orphaned_conversion`] removes.
+///
+/// Requires exclusive access to `path`: the caller must hold no open
+/// connection to it.
+fn convert(
+    path: &Path,
+    from: Option<&SecretString>,
+    to: Option<&SecretString>,
+) -> Result<(), DataError> {
+    let tmp = conversion_temp_path(path);
+    // A previous crash may have left one. It is not a backup of anything.
+    let _ = std::fs::remove_file(&tmp);
+
+    let expected = {
+        // Not read-only: a connection opened read-only inherits that mode
+        // for whatever it ATTACHes too, and ATTACH must create `tmp`.
+        // Nothing here writes to `path` itself.
+        let src = open_keyed(path, false, from)?;
+        let n = item_count(&src)?;
+        export_to(&src, &tmp, to)?;
+        n
+    };
+
+    {
+        let dst = open_keyed(&tmp, true, to)?;
+        let got = item_count(&dst)?;
+        if got != expected {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(DataError::ConversionMismatch { expected, got });
+        }
+    }
+
+    fsync_file(&tmp)?;
+    // Atomic: same directory, therefore same filesystem. This both
+    // installs the new file and destroys the old one — deliberately. A
+    // `.bak` here would preserve exactly the readable copy that
+    // encrypting was meant to remove.
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Encrypt a plaintext database in place.
+///
+/// Requires exclusive access to `path`: the caller must hold no open
+/// connection to it.
+pub fn encrypt_database(path: &Path, passphrase: &SecretString) -> Result<(), DataError> {
+    convert(path, None, Some(passphrase))
+}
+
+/// Decrypt an encrypted database back to plaintext in place.
+///
+/// Requires exclusive access to `path`: the caller must hold no open
+/// connection to it.
+pub fn decrypt_database(path: &Path, passphrase: &SecretString) -> Result<(), DataError> {
+    convert(path, Some(passphrase), None)
+}
+
+/// Change the passphrase of an already-encrypted database.
+///
+/// Unlike encrypting and decrypting, this is genuinely in place:
+/// `PRAGMA rekey` rewrites each page under the new key without an export.
+///
+/// Requires exclusive access to `path`: the caller must hold no open
+/// connection to it.
+pub fn change_passphrase(
+    path: &Path,
+    current: &SecretString,
+    new: &SecretString,
+) -> Result<(), DataError> {
+    let conn = open_keyed(path, false, Some(current))?;
+    conn.pragma_update(None, "rekey", new.expose_secret())?;
+    Ok(())
+}
+
+/// Delete the temporary file a crashed conversion may have left behind.
+/// Safe to call at every launch; a missing file is not an error.
+///
+/// Requires exclusive access to `path`: the caller must hold no open
+/// connection to it.
+pub fn clean_orphaned_conversion(path: &Path) -> Result<(), DataError> {
+    let tmp = conversion_temp_path(path);
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {
+            tracing::warn!("removed an orphaned conversion file: {}", tmp.display());
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(DataError::from(e)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    // `use super::*` matters: Task 5 adds tests here that call
-    // `encrypt_database` and friends unqualified. Nothing in this module
-    // uses it yet, hence the allow below — Task 5 removes it once it does.
-    #[allow(unused_imports)]
     use super::*;
     use crate::{Database, EncryptionState};
     use tempfile::TempDir;
@@ -227,5 +366,157 @@ mod tests {
         let path = dir.path().join("enc.sqlite");
         let db = Database::open_with_key(&path, false, Some(&pass("s3cret"))).unwrap();
         assert_eq!(db.schema_version().unwrap(), Some(1));
+    }
+
+    /// Seed a plaintext database with a folder and two snippets, and
+    /// return the path. Used by the conversion tests.
+    fn seeded(dir: &TempDir, name: &str) -> std::path::PathBuf {
+        let path = dir.path().join(name);
+        let db = Database::open(&path, false).unwrap();
+        let mut folder = Item::new_folder(0, "Work");
+        db.insert(&mut folder).unwrap();
+        let mut a = Item::new_plain(folder.id.unwrap(), "Token", "abc123");
+        db.insert(&mut a).unwrap();
+        let mut b = Item::new_plain(0, "Address", "1 High St");
+        db.insert(&mut b).unwrap();
+        path
+    }
+
+    #[test]
+    fn encrypting_preserves_every_item_and_the_migration_history() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let p = pass("s3cret");
+
+        encrypt_database(&path, &p).unwrap();
+
+        assert_eq!(
+            Database::encryption_state(&path).unwrap(),
+            EncryptionState::Encrypted
+        );
+        let db = Database::open_with_key(&path, false, Some(&p)).unwrap();
+        let loaded = db.load_all().unwrap();
+        assert_eq!(loaded.len(), 3);
+        // `load_all` orders by (parent_id, order_index, id): the two
+        // root items (Work, Address) sort before Token, which lives under
+        // the Work folder's non-zero parent_id.
+        assert!(loaded.iter().any(|i| i.body_plain == "abc123"));
+        assert_eq!(
+            db.schema_version().unwrap(),
+            Some(1),
+            "sqlcipher_export must carry refinery_schema_history across"
+        );
+    }
+
+    #[test]
+    fn decrypting_restores_a_plaintext_file() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let p = pass("s3cret");
+
+        encrypt_database(&path, &p).unwrap();
+        decrypt_database(&path, &p).unwrap();
+
+        assert_eq!(
+            Database::encryption_state(&path).unwrap(),
+            EncryptionState::Plaintext
+        );
+        let db = Database::open(&path, false).unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn changing_the_passphrase_invalidates_the_old_one() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let old = pass("old one");
+        let new = pass("new one");
+
+        encrypt_database(&path, &old).unwrap();
+        change_passphrase(&path, &old, &new).unwrap();
+
+        let err = Database::open_with_key(&path, false, Some(&old)).unwrap_err();
+        assert!(matches!(err, DataError::WrongPassphrase));
+
+        let db = Database::open_with_key(&path, false, Some(&new)).unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn changing_the_passphrase_needs_the_current_one() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        encrypt_database(&path, &pass("right")).unwrap();
+
+        let err = change_passphrase(&path, &pass("guess"), &pass("new")).unwrap_err();
+        assert!(matches!(err, DataError::WrongPassphrase));
+    }
+
+    /// A passphrase containing a quote must not be able to break out of
+    /// the pragma. `rusqlite::pragma_update` binds the value and doubles
+    /// embedded quotes rather than interpolating it, so this pins that
+    /// property against the whole encrypt/decrypt round trip rather than
+    /// just trusting a reading of `rusqlite`'s source.
+    #[test]
+    fn a_passphrase_containing_a_quote_round_trips() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let p = pass("o'brien's \"secret\"");
+
+        encrypt_database(&path, &p).unwrap();
+
+        let db = Database::open_with_key(&path, false, Some(&p)).unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 3);
+
+        let new = pass("d'artagnan");
+        change_passphrase(&path, &p, &new).unwrap();
+
+        let err = Database::open_with_key(&path, false, Some(&p)).unwrap_err();
+        assert!(matches!(err, DataError::WrongPassphrase));
+        let db = Database::open_with_key(&path, false, Some(&new)).unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 3);
+    }
+
+    /// A crash between the export and the rename leaves a `.new` file. It
+    /// must never be mistaken for the real database, and the next launch
+    /// clears it.
+    #[test]
+    fn an_orphaned_conversion_file_is_cleaned_up() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let orphan = path.with_extension("sqlite.new");
+        std::fs::write(&orphan, b"junk").unwrap();
+
+        clean_orphaned_conversion(&path).unwrap();
+
+        assert!(!orphan.exists(), "the orphan must be gone");
+        assert!(path.exists(), "the real database must be untouched");
+        assert_eq!(
+            Database::open(&path, false)
+                .unwrap()
+                .load_all()
+                .unwrap()
+                .len(),
+            3
+        );
+    }
+
+    /// The plaintext file this feature exists to eliminate must not
+    /// survive as a backup.
+    #[test]
+    fn encrypting_leaves_no_plaintext_copy_behind() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        encrypt_database(&path, &pass("s3cret")).unwrap();
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .filter(|n| n != "lib.sqlite")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no copy of the database may remain: {leftovers:?}"
+        );
     }
 }
