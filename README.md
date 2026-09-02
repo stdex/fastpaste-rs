@@ -92,6 +92,7 @@ The app starts and stays useful when a piece of the desktop is missing:
 | System tray | The app quits when the main window is closed, rather than staying resident with no way to reach it |
 | A readable `config.toml` | The unreadable file is moved to `config.toml.bak` and defaults are used, rather than failing to start |
 | A decodable database row | The row is skipped and logged; the rest of the library still loads |
+| A credential store (Secret Service / Credential Manager) | Only matters with an encrypted database: the passphrase cannot be remembered, so it is prompted at every launch. The *Remember* checkbox is disabled and says why |
 
 ## Build prerequisites (Linux)
 

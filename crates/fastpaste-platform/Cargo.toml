@@ -12,6 +12,26 @@ tracing.workspace = true
 # the target sections below); arboard only covers get/set.
 arboard = "3.6"
 
+# One credential-store API over Secret Service (Linux) and Credential
+# Manager (Windows), so this backend needs no cfg of its own — keyring's
+# own Cargo.toml target-gates the Linux D-Bus deps and the Windows deps,
+# so declaring both feature sets here costs nothing on either platform.
+# `sync-secret-service` alone doesn't build: the Secret Service protocol
+# encrypts the session over D-Bus, and the D-Bus backend needs a crypto
+# implementation picked explicitly. `crypto-rust` (pure Rust: aes, cbc,
+# hkdf, sha2) over `crypto-openssl` — this crate has no other reason to
+# link OpenSSL, unlike fastpaste-data which already vendors it for
+# SQLCipher. `vendored` builds libdbus from source instead of requiring
+# system libdbus-1-dev/pkg-config, which is not guaranteed on every
+# build or CI machine.
+keyring = { version = "3", features = [
+    "windows-native",
+    "sync-secret-service",
+    "crypto-rust",
+    "vendored",
+] }
+secrecy.workspace = true
+
 [target.'cfg(target_os = "linux")'.dependencies]
 evdev = "0.13"
 # Native data-control reads/writes on Wayland, matching the transport the
