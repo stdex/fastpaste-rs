@@ -200,7 +200,7 @@ impl Settings {
     /// Where the config file lives. Resolved via the shared [`crate::paths`]
     /// helper so config and data dirs derive from one `ProjectDirs` triple;
     /// on Linux this is `~/.config/fastpaste/config.toml`.
-    fn config_path() -> anyhow::Result<std::path::PathBuf> {
+    pub(crate) fn config_path() -> anyhow::Result<std::path::PathBuf> {
         let proj_dirs = crate::paths::project_dirs()?;
         Ok(proj_dirs.config_dir().join("config.toml"))
     }

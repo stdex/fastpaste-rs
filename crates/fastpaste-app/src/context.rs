@@ -61,9 +61,15 @@ pub struct AppContext {
     /// closed, so they cannot get it from `db`.
     pub db_path: std::path::PathBuf,
     /// The OS credential store, for remembering the database passphrase.
-    /// Always present; [`fastpaste_platform::UnavailableSecretStore`]
-    /// stands in when the session has no store, so callers never branch on
-    /// an `Option`.
+    /// Always the real [`fastpaste_platform::SystemSecretStore`] — never
+    /// substituted for [`fastpaste_platform::UnavailableSecretStore`] based
+    /// on a startup probe, because a negative `is_available()` can mean
+    /// "merely locked right now" rather than "will never work" (Task 6),
+    /// and latching that verdict into the type would disable the Options
+    /// dialog's Remember checkbox for the whole session with no recovery
+    /// but a restart. Callers that care whether it can be used right now
+    /// (the unlock dialog, the Options dialog) call `is_available()`
+    /// themselves at the moment it matters.
     pub secret_store: Arc<dyn fastpaste_platform::SecretStore>,
 }
 
@@ -178,6 +184,13 @@ pub struct StartupProbe {
     /// Settings, loaded before the database so the unlock dialog can be
     /// shown in the user's language.
     pub settings: Settings,
+    /// The resolved data directory `db_path` was derived from. Carried on
+    /// the probe per the two-phase interface even though nothing reads it
+    /// back today — `build_unlocked_from` only ever needs `db_path` — kept
+    /// as a natural place for a future consumer (e.g. a diagnostic that
+    /// wants the directory rather than `db_path.parent()`) to reach it
+    /// without re-deriving it.
+    #[allow(dead_code)]
     data_dir: std::path::PathBuf,
     db_path: std::path::PathBuf,
     /// Behind a `RefCell` because Task 9 hands out `&StartupProbe` so a
@@ -197,6 +210,26 @@ impl AppContext {
     pub fn probe() -> anyhow::Result<StartupProbe> {
         let proj_dirs = crate::paths::project_dirs()?;
         let data_dir = proj_dirs.data_dir().to_path_buf();
+        Self::probe_in(&data_dir, &Settings::config_path()?)
+    }
+
+    /// [`Self::probe`], parameterised on the data directory and the
+    /// settings file. `probe()` is untestable as a zero-argument function:
+    /// it resolves a real XDG data dir and takes a real single-instance
+    /// key from it, and it calls `Settings::load()`, which reads the
+    /// developer's actual `~/.config/fastpaste/config.toml`. This seam
+    /// lets a test point both at a fresh `TempDir` — a distinct instance
+    /// key that cannot collide with a running instance, and a settings
+    /// file the test controls — while running the exact guard →
+    /// clean-orphan → encryption-state → settings body `probe()` also
+    /// runs, so a regression that made this function open the database or
+    /// claim a device (the failure mode the ordering comment below
+    /// exists to prevent) is one a test can actually catch.
+    fn probe_in(
+        data_dir: &std::path::Path,
+        settings_path: &std::path::Path,
+    ) -> anyhow::Result<StartupProbe> {
+        let data_dir = data_dir.to_path_buf();
 
         // ---- Single-instance guard, FIRST ----------------------------------
         // Before the database is opened and before any OS resource is
@@ -236,7 +269,7 @@ impl AppContext {
         let encryption = fastpaste_data::Database::encryption_state(&db_path)?;
         tracing::info!("database encryption state: {encryption:?}");
 
-        let settings = Settings::load()?;
+        let settings = Settings::load_from(settings_path)?;
 
         Ok(StartupProbe {
             encryption,
@@ -248,7 +281,20 @@ impl AppContext {
     }
 
     /// Second half of startup: open the database with `key` and build
-    /// every service. Consumes the probe, taking over its guard.
+    /// every service, taking the probe's guard by reference so a caller
+    /// can retry against the same probe.
+    ///
+    /// The guard is taken out of `probe` LAST, only once every fallible
+    /// step below has already succeeded, immediately before
+    /// [`Self::new`] is called. Taking it any earlier — e.g. right after
+    /// opening the database — would mean a *later* failure (a platform
+    /// service that could not start) drops the local holding it and
+    /// releases the single-instance bind while unwinding, even though
+    /// `probe` itself survives the `?`. The next retry against that same
+    /// probe (a wrong passphrase, corrected on a second attempt — Task 9)
+    /// would then run with no guard at all. Ending on a still-empty
+    /// `RefCell` after any failure, and taking the guard only on the
+    /// attempt that actually succeeds, is what makes retrying safe.
     ///
     /// Degradation policy is unchanged from the original `build`:
     /// `/dev/uinput` unavailable → [`NullPasteKeys`]; no X connection →
@@ -260,25 +306,12 @@ impl AppContext {
     /// verdict to bake into the type at startup, so callers that care
     /// (the unlock dialog, the Options dialog) ask `is_available()`
     /// themselves at the moment it matters.
-    pub fn build_unlocked(
-        probe: StartupProbe,
+    pub fn build_unlocked_from(
+        probe: &StartupProbe,
         key: Option<secrecy::SecretString>,
     ) -> anyhow::Result<Self> {
-        let StartupProbe {
-            settings,
-            data_dir,
-            db_path,
-            single_instance,
-            ..
-        } = probe;
-        let _ = &data_dir;
-        // Exactly once: a second build from the same probe would get None
-        // and run without a guard. Treat that as a bug rather than
-        // silently starting unguarded.
-        let single_instance = single_instance
-            .borrow_mut()
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("startup probe already consumed"))?;
+        let settings = probe.settings.clone();
+        let db_path = probe.db_path.clone();
 
         let db = Arc::new(Mutex::new(fastpaste_data::Database::open_with_key(
             &db_path,
@@ -329,6 +362,16 @@ impl AppContext {
             settings.clipboard_history.max_items,
         );
 
+        // Every fallible step above succeeded. Only now claim the guard —
+        // exactly once: a second build from the same probe would get
+        // None and run without one. Treat that as a bug rather than
+        // silently starting unguarded.
+        let single_instance = probe
+            .single_instance
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("startup probe already consumed"))?;
+
         Ok(Self::new(
             db,
             clipboard,
@@ -339,6 +382,16 @@ impl AppContext {
             db_path,
             secret_store,
         ))
+    }
+
+    /// [`Self::build_unlocked_from`] taking the probe by value, for the
+    /// common case — [`Self::build`], and `main()`'s happy path — where
+    /// there is no retry and the probe can simply be consumed.
+    pub fn build_unlocked(
+        probe: StartupProbe,
+        key: Option<secrecy::SecretString>,
+    ) -> anyhow::Result<Self> {
+        Self::build_unlocked_from(&probe, key)
     }
 
     /// Both halves at once, with no passphrase. Fails on an encrypted
@@ -574,5 +627,118 @@ mod tests {
         let loaded = ctx.db.lock().unwrap().load_all().unwrap();
         assert_eq!(loaded[0].body_plain, "B");
         assert_eq!(ctx.db_path, path, "conversions need the path");
+    }
+
+    /// Exercises the real `probe()` body (via the `probe_in` seam) end to
+    /// end into a real `build_unlocked`: a fresh directory probes as
+    /// `Absent`, and the resulting context's database is genuinely open
+    /// and usable. This is the test that would catch a regression where
+    /// `probe()` started opening the database or claiming a device before
+    /// `build_unlocked` runs — the exact class of bug the guard-first
+    /// ordering comment on `probe_in` exists to prevent.
+    #[test]
+    fn probe_then_build_unlocked_produces_a_working_context() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        let settings_path = dir.path().join("config.toml");
+
+        let probe = AppContext::probe_in(&data_dir, &settings_path).unwrap();
+        assert_eq!(
+            probe.encryption,
+            fastpaste_data::EncryptionState::Absent,
+            "nothing has been written yet"
+        );
+
+        let expected_db_path = data_dir.join("fastpaste.sqlite");
+        let ctx = AppContext::build_unlocked(probe, None).unwrap();
+        assert_eq!(ctx.db_path, expected_db_path);
+        assert!(
+            ctx.db.lock().unwrap().load_all().unwrap().is_empty(),
+            "a fresh database opens with no items"
+        );
+    }
+
+    /// `probe_in` must report `Encrypted` for a database that was
+    /// encrypted ahead of time, and `build_unlocked_from` must actually
+    /// decrypt it given the right key.
+    #[test]
+    fn probe_reports_encrypted_for_an_encrypted_database() {
+        use secrecy::SecretString;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        let settings_path = dir.path().join("config.toml");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("fastpaste.sqlite");
+        let key = SecretString::from("s3cret".to_string());
+        {
+            let db = fastpaste_data::Database::open(&db_path, false).unwrap();
+            let mut item = fastpaste_data::Item::new_plain(0, "T", "B");
+            db.insert(&mut item).unwrap();
+        }
+        fastpaste_data::encrypt_database(&db_path, &key).unwrap();
+
+        let probe = AppContext::probe_in(&data_dir, &settings_path).unwrap();
+        assert_eq!(probe.encryption, fastpaste_data::EncryptionState::Encrypted);
+
+        let ctx = AppContext::build_unlocked_from(&probe, Some(key)).unwrap();
+        let loaded = ctx.db.lock().unwrap().load_all().unwrap();
+        assert_eq!(loaded[0].body_plain, "B");
+    }
+
+    /// The whole reason the guard lives behind a `RefCell`: a wrong
+    /// passphrase must fail `build_unlocked_from` WITHOUT releasing the
+    /// single-instance guard, so a second attempt against the same probe
+    /// (Task 9's retry loop) still runs guarded.
+    #[test]
+    fn a_failed_attempt_leaves_the_guard_for_a_retry_that_then_succeeds() {
+        use secrecy::SecretString;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        let settings_path = dir.path().join("config.toml");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join("fastpaste.sqlite");
+        let key = SecretString::from("right".to_string());
+        {
+            let db = fastpaste_data::Database::open(&db_path, false).unwrap();
+            let mut item = fastpaste_data::Item::new_plain(0, "T", "B");
+            db.insert(&mut item).unwrap();
+        }
+        fastpaste_data::encrypt_database(&db_path, &key).unwrap();
+
+        let probe = AppContext::probe_in(&data_dir, &settings_path).unwrap();
+
+        let wrong = SecretString::from("nope".to_string());
+        assert!(
+            AppContext::build_unlocked_from(&probe, Some(wrong)).is_err(),
+            "the wrong passphrase must not open the database"
+        );
+
+        // If the failed attempt above had already taken the guard, this
+        // would fail with "startup probe already consumed" instead of
+        // opening the database.
+        let ctx = AppContext::build_unlocked_from(&probe, Some(key)).unwrap();
+        let loaded = ctx.db.lock().unwrap().load_all().unwrap();
+        assert_eq!(loaded[0].body_plain, "B");
+    }
+
+    /// A second `build_unlocked_from` against a probe that already
+    /// succeeded once must fail loudly rather than silently starting with
+    /// no single-instance guard.
+    #[test]
+    fn a_second_build_from_the_same_probe_is_reported_as_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let data_dir = dir.path().join("data");
+        let settings_path = dir.path().join("config.toml");
+
+        let probe = AppContext::probe_in(&data_dir, &settings_path).unwrap();
+        let _ctx = AppContext::build_unlocked_from(&probe, None).unwrap();
+
+        let err = match AppContext::build_unlocked_from(&probe, None) {
+            Ok(_) => panic!("the guard was already taken by the first build"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("already consumed"), "got: {err}");
     }
 }
