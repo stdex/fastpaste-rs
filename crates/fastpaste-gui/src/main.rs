@@ -28,11 +28,12 @@
 // All Slint windows/tray are created on the event-loop thread. Worker
 // threads marshal UI work via `slint::invoke_from_event_loop`.
 
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use fastpaste_app::{AppContext, Settings};
-use fastpaste_data::{Item, ItemKind};
-use fastpaste_platform::{GlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID};
+use fastpaste_data::{EncryptionState, Item, ItemKind};
+use fastpaste_platform::{GlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID, SecretStore as _};
 
 // `Model` trait is in scope so we can call `.row_data()` on a `ModelRc` in
 // `selected_row_id` / `current_parent_id`.
@@ -137,13 +138,61 @@ fn main() -> anyhow::Result<()> {
 
     tracing::info!("fastpaste-gui starting");
 
-    // ---- Composition root: build all services + open the DB -----------------
-    // AppContext::build() loads Settings, wires Paster from
-    // paste.delay_ms/restore_clipboard, builds ClipboardHistory from
-    // clipboard_history.max_items/enabled, and takes the single-instance
-    // advisory lock.
-    let ctx = Arc::new(AppContext::build()?);
+    // ---- Phase one: guard, settings, encryption state ------------------------
+    // Nothing is opened and no device is claimed here, because an
+    // encrypted database puts a dialog on screen before phase two runs.
+    let probe = AppContext::probe()?;
+    *I18N_LOCALE.lock().unwrap_or_else(|e| e.into_inner()) =
+        probe.settings.general.language.clone();
 
+    if probe.encryption != EncryptionState::Encrypted {
+        // Nothing to unlock: phase two immediately, exactly as before.
+        let ctx = Arc::new(AppContext::build_unlocked(probe, None)?);
+        start_app(ctx.clone())?;
+        return run_loop(ctx);
+    }
+
+    // ---- Encrypted: try the keyring, then ask --------------------------------
+    // The store is probed here rather than inside the context, because
+    // the context does not exist until the passphrase is known.
+    let store = fastpaste_platform::SystemSecretStore::new();
+    let remembered = if store.is_available() {
+        store
+            .get(fastpaste_app::PASSPHRASE_ACCOUNT)
+            .unwrap_or_else(|e| {
+                tracing::warn!("could not read the remembered passphrase: {e}");
+                None
+            })
+    } else {
+        None
+    };
+
+    if let Some(key) = remembered {
+        match AppContext::build_unlocked_from(&probe, Some(key)) {
+            Ok(ctx) => {
+                let ctx = Arc::new(ctx);
+                start_app(ctx.clone())?;
+                return run_loop(ctx);
+            }
+            Err(e) => {
+                // A remembered passphrase that no longer works is a stale
+                // entry, not a failure: drop it and ask, rather than
+                // leaving the user with an app that will not start.
+                tracing::warn!("the remembered passphrase did not work ({e}); clearing it");
+                let _ = store.delete(fastpaste_app::PASSPHRASE_ACCOUNT);
+            }
+        }
+    }
+
+    unlock_then_start(probe, store)
+}
+
+/// Everything that needs an open database: i18n, tray, hotkeys, the
+/// hotkey-events thread, the tree-refresh worker and the clipboard
+/// drainer. Called either directly (plaintext database) or from the
+/// unlock dialog's accept handler, which is why it is a function and no
+/// longer the body of `main`.
+fn start_app(ctx: Arc<AppContext>) -> anyhow::Result<()> {
     // ---- i18n: stash the active locale so `i18n()` can build a fresh ----
     // translator on demand. See the I18N_LOCALE comment for why we don't
     // store the translator itself.
@@ -260,8 +309,109 @@ fn main() -> anyhow::Result<()> {
         ctx.settings().clipboard_history.max_items,
     );
 
-    // Run the Slint event loop.
-    //
+    Ok(())
+}
+
+/// Put the unlock dialog on screen and start the app once it succeeds.
+///
+/// The dialog is created and shown *before* the event loop, the same way
+/// the tray is today. Its accept handler runs inside the loop and does
+/// phase two there.
+fn unlock_then_start(
+    probe: fastpaste_app::StartupProbe,
+    store: fastpaste_platform::SystemSecretStore,
+) -> anyhow::Result<()> {
+    let dialog = UnlockDialog::new()?;
+    apply_translations(&dialog, &i18n());
+    dialog.set_remember_available(store.is_available());
+
+    let probe = Rc::new(probe);
+    let store = Rc::new(store);
+    let weak = dialog.as_weak();
+    // Set the moment an unlock attempt succeeds and `start_app` has been
+    // handed the context, so a stray `cancel-clicked()` cannot reach us
+    // afterwards. The dialog's outer `FocusScope` fires `cancel-clicked()`
+    // on Escape with no `busy` check (only the Cancel *button* is disabled
+    // while busy), so a real, if narrow, race exists: the user presses
+    // Escape while `unlock-clicked` is still running; Slint queues the key
+    // event and delivers it only once that (synchronous) handler returns.
+    // If it returned via the success branch, the dialog is already hidden
+    // and the app already started — without this flag, the queued cancel
+    // would still run and call `quit_event_loop()`, tearing down the app
+    // it just started.
+    let unlocked = Rc::new(std::cell::Cell::new(false));
+
+    {
+        let probe = probe.clone();
+        let store = store.clone();
+        let weak = weak.clone();
+        let unlocked = unlocked.clone();
+        dialog.on_unlock_clicked(move || {
+            let Some(d) = weak.upgrade() else { return };
+            let key = secrecy::SecretString::from(d.get_passphrase().to_string());
+            d.set_busy(true);
+            d.set_error_message("".into());
+
+            match AppContext::build_unlocked_from(&probe, Some(key.clone())) {
+                Ok(ctx) => {
+                    if d.get_remember()
+                        && store.is_available()
+                        && let Err(e) = store.set(fastpaste_app::PASSPHRASE_ACCOUNT, &key)
+                    {
+                        // Not fatal: the database is open. The user
+                        // just gets prompted again next time.
+                        tracing::warn!("could not remember the passphrase: {e}");
+                    }
+                    // A cancel that arrives after this point must be a
+                    // no-op — see the comment on `unlocked` above.
+                    unlocked.set(true);
+                    // Clear the field before the window goes away, so the
+                    // passphrase does not sit in a live SharedString.
+                    d.set_passphrase("".into());
+                    let _ = d.hide();
+
+                    let ctx = Arc::new(ctx);
+                    if let Err(e) = start_app(ctx) {
+                        tracing::error!("startup failed after unlock: {e}");
+                        let _ = slint::quit_event_loop();
+                    }
+                }
+                Err(e) => {
+                    tracing::info!("unlock attempt rejected: {e}");
+                    d.set_busy(false);
+                    d.set_passphrase("".into());
+                    d.set_error_message(i18n().msg("unlock-error-wrong").into());
+                }
+            }
+        });
+    }
+
+    dialog.on_cancel_clicked(move || {
+        if unlocked.get() {
+            // A queued Escape that lost the race against a just-succeeded
+            // unlock attempt (see the comment on `unlocked` above): the
+            // app is already running, so this cancel does nothing.
+            return;
+        }
+        tracing::info!("unlock cancelled; exiting");
+        if let Some(d) = weak.upgrade() {
+            let _ = d.hide();
+        }
+        let _ = slint::quit_event_loop();
+    });
+
+    dialog.show()?;
+    // Always the until-quit form here: the dialog may be the only window
+    // and hiding it must not end the process before `start_app` has put
+    // the tray up. See the spike recorded in the design doc.
+    let result = slint::run_event_loop_until_quit();
+    ui_state::release_all();
+    result.map_err(|e| anyhow::anyhow!("Slint event loop exited with error: {e}"))
+}
+
+/// Run the event loop for an already-started app, then flush and tear
+/// down. This is the tail of the old `main`.
+fn run_loop(ctx: Arc<AppContext>) -> anyhow::Result<()> {
     // `run_event_loop` returns once the last window is closed AND the last
     // visible tray icon is hidden. With a tray that is what we want: it
     // stays alive with no windows open, until the tray's Quit item calls

@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _keep: Box<dyn std::any::Any> = match which.as_str() {
         "options" => Box::new(build_options(page, ru)?),
         "select" => Box::new(build_selection(ru)?),
-        "unlock" => Box::new(build_unlock(page == 1, ru)?),
+        "unlock" => Box::new(build_unlock(page, ru)?),
         _ => Box::new(build_main_with(page == 1, ru)?),
     };
 
@@ -213,10 +213,20 @@ fn build_selection(ru: bool) -> Result<SelectionDialog, slint::PlatformError> {
 /// `page == 1` renders the wrong-passphrase state, which is the one
 /// worth looking at: the error text has to fit without pushing the
 /// buttons off the bottom in the widest locale.
-fn build_unlock(with_error: bool, ru: bool) -> Result<UnlockDialog, slint::PlatformError> {
+///
+/// `page == 2` renders the *enabled* remember-checkbox state
+/// (`remember-available: true`), which the production driver
+/// (`unlock_then_start` in `main.rs`) actually produces whenever the
+/// credential store is reachable — pages 0 and 1 hardcode
+/// `remember-available: false` and so never exercised the "Remember in
+/// the system keyring" label, only the longer "(unavailable)" one.
+fn build_unlock(page: i32, ru: bool) -> Result<UnlockDialog, slint::PlatformError> {
+    let with_error = page == 1;
+    let remember_available = page == 2;
+
     let d = UnlockDialog::new()?;
     d.set_passphrase("hunter2".into());
-    d.set_remember_available(false);
+    d.set_remember_available(remember_available);
     if with_error {
         d.set_error_message("Wrong passphrase.".into());
     }
@@ -225,6 +235,7 @@ fn build_unlock(with_error: bool, ru: bool) -> Result<UnlockDialog, slint::Platf
         t.set_unlock_title("Разблокировать fastpaste".into());
         t.set_unlock_prompt("База данных зашифрована. Введите пароль, чтобы открыть её.".into());
         t.set_unlock_passphrase_label("Пароль:".into());
+        t.set_unlock_remember("Запомнить в системном хранилище ключей".into());
         t.set_unlock_remember_unavailable(
             "Запомнить в системном хранилище ключей (недоступно в этом сеансе)".into(),
         );

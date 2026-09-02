@@ -19,6 +19,7 @@ tracing-subscriber.workspace = true
 fluent-templates.workspace = true
 sys-locale.workspace = true
 fastpaste-data = { path = "../fastpaste-data" }
+secrecy.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true

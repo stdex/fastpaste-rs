@@ -93,6 +93,8 @@ The app starts and stays useful when a piece of the desktop is missing:
 | A readable `config.toml` | The unreadable file is moved to `config.toml.bak` and defaults are used, rather than failing to start |
 | A decodable database row | The row is skipped and logged; the rest of the library still loads |
 | A credential store (Secret Service / Credential Manager) | Only matters with an encrypted database: the passphrase cannot be remembered, so it is prompted at every launch. The *Remember* checkbox is disabled and says why |
+| The passphrase for an encrypted database | The unlock dialog stays up with a "wrong passphrase" message; cancelling exits cleanly and releases the single-instance guard |
+| A remembered passphrase that no longer works | The stale keyring entry is cleared and the dialog is shown, rather than the app refusing to start |
 
 ## Build prerequisites (Linux)
 
