@@ -223,6 +223,30 @@ Prove it with a throwaway spike before implementing section 4; if it does
 not hold, the fallback is to keep the tray built pre-loop and gate its
 DB-dependent handlers on the locked state.
 
+**Spike result (2026-09-02) — Confirmed.** A throwaway example
+(`crates/fastpaste-gui/examples/loop_spike.rs`, deleted after the run) created
+a window and showed it before calling `slint::run_event_loop_until_quit()`,
+then — from a `slint::Timer` callback firing after the loop was already
+running — created and showed a *second* window, hid the first, and confirmed
+the loop was still alive before calling `slint::quit_event_loop()`. Run twice
+against the live Wayland session on the development machine (Slint 1.17.1);
+both runs printed all five PROBE lines in order and exited 0:
+
+```
+PROBE 1: window created before the loop
+PROBE 2: shown before the loop
+PROBE 3: second window created + shown from inside the loop
+PROBE 4: loop still alive after the first window closed
+PROBE 5: loop exited via quit_event_loop
+```
+
+The assumption holds: a window can be created and shown before
+`run_event_loop_until_quit`, and further windows (and, by extension, a tray
+icon) can be created from a callback after the loop has started, without the
+loop exiting early. Task 9 proceeds as written: always call
+`run_event_loop_until_quit`, with the no-tray path calling `quit_event_loop()`
+explicitly from the main window's close handler.
+
 ## 5. Encrypt, decrypt, change passphrase
 
 The Options dialog gains a Security page: a state line, then *Encrypt
