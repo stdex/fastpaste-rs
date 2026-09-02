@@ -19,3 +19,6 @@ Thumbs.db
 
 # Local agent/tooling scratch (review diffs).
 .superpowers/
+
+# Harness-managed git worktrees.
+/.claude/worktrees/
