@@ -277,6 +277,9 @@ Create `crates/fastpaste-data/src/crypto.rs` with only a test module for now:
 
 #[cfg(test)]
 mod tests {
+    // `use super::*` matters: Task 5 adds tests here that call
+    // `encrypt_database` and friends unqualified.
+    use super::*;
     use crate::{Database, EncryptionState};
     use tempfile::TempDir;
 
@@ -1073,10 +1076,12 @@ Expected: FAIL to compile — the module is not declared and none of the types e
 
 Add to `crates/fastpaste-platform/Cargo.toml` under `[dependencies]`:
 
+This feature set is a starting point, not a verified fact: check what `keyring` 3 actually requires for Secret Service plus Credential Manager (it may need an explicit crypto backend alongside `sync-secret-service`) and adjust until it builds. There is no macOS target in this project, so do not add `apple-native`.
+
 ```toml
 # One credential-store API over Secret Service (Linux) and Credential
 # Manager (Windows), so this backend needs no cfg of its own.
-keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+keyring = { version = "3", features = ["windows-native", "sync-secret-service"] }
 secrecy.workspace = true
 ```
 
@@ -1442,7 +1447,10 @@ pub struct StartupProbe {
     pub settings: Settings,
     data_dir: std::path::PathBuf,
     db_path: std::path::PathBuf,
-    single_instance: SingleInstance,
+    /// Behind a `RefCell` because Task 9 hands out `&StartupProbe` so a
+    /// wrong passphrase can be retried against the same probe, and the
+    /// build path still has to move the guard out of it exactly once.
+    single_instance: std::cell::RefCell<Option<SingleInstance>>,
 }
 
 impl AppContext {
@@ -1490,7 +1498,7 @@ impl AppContext {
             settings,
             data_dir,
             db_path,
-            single_instance,
+            single_instance: std::cell::RefCell::new(Some(single_instance)),
         })
     }
 
@@ -1514,6 +1522,9 @@ impl AppContext {
             ..
         } = probe;
         let _ = &data_dir;
+        // Exactly once: a second build from the same probe would get None
+        // and run without a guard.
+        let single_instance = single_instance.into_inner();
 
         let db = Arc::new(Mutex::new(fastpaste_data::Database::open_with_key(
             &db_path,
@@ -1570,7 +1581,7 @@ impl AppContext {
             uinput,
             hotkey,
             settings,
-            Some(single_instance),
+            single_instance,
             db_path,
             secret_store,
         ))
@@ -2025,7 +2036,17 @@ fn main() -> anyhow::Result<()> {
     }
 ```
 
-Refactor the body of `build_unlocked` into `fn finish(probe: &StartupProbe, db: Database) -> anyhow::Result<Self>`, which builds the platform services and calls `Self::new`. Because `finish` needs the guard, change `StartupProbe::single_instance` to `Option<SingleInstance>` and have `finish` `take()` it — add `single_instance: std::cell::RefCell<Option<SingleInstance>>` if borrow-checking objects, and document why.
+Refactor the body of `build_unlocked` into `fn finish(probe: &StartupProbe, db: Database) -> anyhow::Result<Self>`, which builds the platform services and calls `Self::new`. `finish` takes the guard with `probe.single_instance.borrow_mut().take()` — Task 7 already declared the field as `RefCell<Option<SingleInstance>>` for exactly this. A `None` there means the probe was already built from; treat it as a bug and return an error rather than starting with no guard:
+
+```rust
+        let single_instance = probe
+            .single_instance
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("this StartupProbe was already consumed"))?;
+```
+
+`build_unlocked` then becomes `Self::finish(&probe, db)` over the database it opened.
 
 - [ ] **Step 3: Write the dialog driver and the loop helper**
 
@@ -2175,6 +2196,7 @@ git commit -m "Prompt for the passphrase when the database is encrypted"
 - Modify: all five files in `crates/fastpaste-gui/i18n/`
 - Modify: `crates/fastpaste-gui/src/main.rs` (options controller, `apply_translations`)
 - Modify: `crates/fastpaste-gui/examples/ui_preview.rs`
+- Modify: `crates/fastpaste-data/src/database.rs` (adds `open_in_memory`)
 - Modify: `README.md` (features list)
 
 **Interfaces:**
