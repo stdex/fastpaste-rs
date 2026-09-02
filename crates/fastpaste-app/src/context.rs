@@ -14,6 +14,10 @@ use crate::clipboard_history::ClipboardHistory;
 use crate::paster::Paster;
 use crate::settings::Settings;
 
+/// Account name under which the database passphrase is filed in the
+/// credential store. One database per user, so one fixed name.
+pub const PASSPHRASE_ACCOUNT: &str = "database-passphrase";
+
 /// All long-lived services, bundled for passing to UI controllers.
 ///
 /// `db` sits behind a `Mutex` (not a bare `Arc<Database>`) because
@@ -52,6 +56,15 @@ pub struct AppContext {
     /// unavailable).
     #[allow(dead_code)]
     pub single_instance: Option<SingleInstance>,
+    /// Where the database file lives. Kept because the encrypt / decrypt /
+    /// change-passphrase operations act on the path with every connection
+    /// closed, so they cannot get it from `db`.
+    pub db_path: std::path::PathBuf,
+    /// The OS credential store, for remembering the database passphrase.
+    /// Always present; [`fastpaste_platform::UnavailableSecretStore`]
+    /// stands in when the session has no store, so callers never branch on
+    /// an `Option`.
+    pub secret_store: Arc<dyn fastpaste_platform::SecretStore>,
 }
 
 impl AppContext {
@@ -93,6 +106,8 @@ impl AppContext {
         hotkey: Arc<dyn GlobalHotkey>,
         settings: Settings,
         single_instance: Option<SingleInstance>,
+        db_path: std::path::PathBuf,
+        secret_store: Arc<dyn fastpaste_platform::SecretStore>,
     ) -> Self {
         let paster = Arc::new(Paster::new(
             clipboard.clone(),
@@ -113,6 +128,8 @@ impl AppContext {
             settings: RwLock::new(settings),
             clipboard_history,
             single_instance,
+            db_path,
+            secret_store,
         }
     }
 }
@@ -150,22 +167,34 @@ fn instance_key_for(data_dir: &std::path::Path) -> String {
     format!("fastpaste_instance_{tail}")
 }
 
+/// What [`AppContext::probe`] learned before anything was opened.
+///
+/// Holds the single-instance guard for the gap between "we know whether a
+/// passphrase is needed" and "we have one", so nothing can start a second
+/// instance while the unlock dialog is up.
+pub struct StartupProbe {
+    /// Whether the database needs a passphrase.
+    pub encryption: fastpaste_data::EncryptionState,
+    /// Settings, loaded before the database so the unlock dialog can be
+    /// shown in the user's language.
+    pub settings: Settings,
+    data_dir: std::path::PathBuf,
+    db_path: std::path::PathBuf,
+    /// Behind a `RefCell` because Task 9 hands out `&StartupProbe` so a
+    /// wrong passphrase can be retried against the same probe, and the
+    /// build path still has to move the guard out of it exactly once.
+    single_instance: std::cell::RefCell<Option<SingleInstance>>,
+}
+
 impl AppContext {
-    /// Construct all services. DB is opened (or created) at
-    /// `~/.local/share/fastpaste/fastpaste.sqlite`.
+    /// First half of startup: take the single-instance guard, load
+    /// settings, and find out whether the database needs a passphrase.
     ///
-    /// Degradation policy, in the order the services are built:
-    /// - another instance already running → error, and `main()` exits
-    ///   before anything else is touched;
-    /// - `/dev/uinput` unavailable → [`NullPasteKeys`]; paste leaves the
-    ///   payload on the clipboard for a manual Ctrl+V;
-    /// - no XWayland / X connection → [`NullGlobalHotkey`]; the tray, the
-    ///   main window and clipboard history all still work, so killing
-    ///   startup over it would be a much larger failure than the one
-    ///   actually encountered;
-    /// - the clipboard backend failing is still fatal: without it neither
-    ///   pasting nor history capture is possible, which is the whole app.
-    pub fn build() -> anyhow::Result<Self> {
+    /// Deliberately opens nothing and claims no device. The caller may
+    /// have to put a dialog on screen before [`Self::build_unlocked`] can
+    /// run, and that must not happen with the clipboard or `/dev/uinput`
+    /// already held.
+    pub fn probe() -> anyhow::Result<StartupProbe> {
         let proj_dirs = crate::paths::project_dirs()?;
         let data_dir = proj_dirs.data_dir().to_path_buf();
 
@@ -195,11 +224,67 @@ impl AppContext {
         }
         tracing::info!("acquired single-instance key {instance_key}");
 
-        // ---- Storage --------------------------------------------------------
         std::fs::create_dir_all(&data_dir)?;
         let db_path = data_dir.join("fastpaste.sqlite");
         tracing::info!("database path: {}", db_path.display());
-        let db = Arc::new(Mutex::new(Database::open(&db_path, false)?));
+
+        // A conversion that was interrupted by a crash leaves a `.new`
+        // file. Now — with the guard held and before anything reads the
+        // directory — is the only safe moment to clear it.
+        fastpaste_data::clean_orphaned_conversion(&db_path)?;
+
+        let encryption = fastpaste_data::Database::encryption_state(&db_path)?;
+        tracing::info!("database encryption state: {encryption:?}");
+
+        let settings = Settings::load()?;
+
+        Ok(StartupProbe {
+            encryption,
+            settings,
+            data_dir,
+            db_path,
+            single_instance: std::cell::RefCell::new(Some(single_instance)),
+        })
+    }
+
+    /// Second half of startup: open the database with `key` and build
+    /// every service. Consumes the probe, taking over its guard.
+    ///
+    /// Degradation policy is unchanged from the original `build`:
+    /// `/dev/uinput` unavailable → [`NullPasteKeys`]; no X connection →
+    /// [`NullGlobalHotkey`]; a failing clipboard backend is still fatal.
+    /// A credential store that cannot be reached is likewise non-fatal —
+    /// it costs the user a prompt each launch, not the app. Note that
+    /// `secret_store` is always the real [`fastpaste_platform::SystemSecretStore`]:
+    /// availability is a live, re-checkable property (Task 6), not a
+    /// verdict to bake into the type at startup, so callers that care
+    /// (the unlock dialog, the Options dialog) ask `is_available()`
+    /// themselves at the moment it matters.
+    pub fn build_unlocked(
+        probe: StartupProbe,
+        key: Option<secrecy::SecretString>,
+    ) -> anyhow::Result<Self> {
+        let StartupProbe {
+            settings,
+            data_dir,
+            db_path,
+            single_instance,
+            ..
+        } = probe;
+        let _ = &data_dir;
+        // Exactly once: a second build from the same probe would get None
+        // and run without a guard. Treat that as a bug rather than
+        // silently starting unguarded.
+        let single_instance = single_instance
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("startup probe already consumed"))?;
+
+        let db = Arc::new(Mutex::new(fastpaste_data::Database::open_with_key(
+            &db_path,
+            false,
+            key.as_ref(),
+        )?));
 
         // ---- Platform services ---------------------------------------------
         let clipboard = Arc::new(SystemClipboard::new()?);
@@ -225,8 +310,16 @@ impl AppContext {
             }
         };
 
-        // ---- Settings -------------------------------------------------------
-        let settings = Settings::load()?;
+        let secret_store: Arc<dyn fastpaste_platform::SecretStore> =
+            Arc::new(fastpaste_platform::SystemSecretStore::new());
+        if !secret_store.is_available() {
+            tracing::warn!(
+                "no credential store available at startup; \
+                 an encrypted database will prompt until one appears \
+                 (this is re-checked live, not latched)"
+            );
+        }
+
         tracing::info!(
             "loaded settings: paste.delay_ms={}, paste.restore_clipboard={}, \
              clipboard_history.enabled={}, clipboard_history.max_items={}",
@@ -243,7 +336,35 @@ impl AppContext {
             hotkey,
             settings,
             Some(single_instance),
+            db_path,
+            secret_store,
         ))
+    }
+
+    /// Both halves at once, with no passphrase. Fails on an encrypted
+    /// database — a caller that might meet one must use [`Self::probe`]
+    /// and [`Self::build_unlocked`] so it can prompt.
+    ///
+    /// Construct all services. DB is opened (or created) at
+    /// `~/.local/share/fastpaste/fastpaste.sqlite`.
+    ///
+    /// Degradation policy, in the order the services are built:
+    /// - another instance already running → error, and `main()` exits
+    ///   before anything else is touched;
+    /// - `/dev/uinput` unavailable → [`NullPasteKeys`]; paste leaves the
+    ///   payload on the clipboard for a manual Ctrl+V;
+    /// - no XWayland / X connection → [`NullGlobalHotkey`]; the tray, the
+    ///   main window and clipboard history all still work, so killing
+    ///   startup over it would be a much larger failure than the one
+    ///   actually encountered;
+    /// - the clipboard backend failing is still fatal: without it neither
+    ///   pasting nor history capture is possible, which is the whole app.
+    pub fn build() -> anyhow::Result<Self> {
+        let probe = Self::probe()?;
+        if probe.encryption == fastpaste_data::EncryptionState::Encrypted {
+            anyhow::bail!("the database is encrypted; build() cannot supply a passphrase");
+        }
+        Self::build_unlocked(probe, None)
     }
 }
 
@@ -257,6 +378,7 @@ mod tests {
         let db = Arc::new(Mutex::new(
             Database::open(&dir.path().join("t.sqlite"), false).unwrap(),
         ));
+        let db_path = dir.path().join("t.sqlite");
         let ctx = AppContext::new(
             db,
             Arc::new(NullClipboard::new()),
@@ -264,6 +386,8 @@ mod tests {
             Arc::new(NullGlobalHotkey::new()),
             settings,
             None,
+            db_path,
+            Arc::new(fastpaste_platform::NullSecretStore::new()),
         );
         (dir, ctx)
     }
@@ -363,9 +487,8 @@ mod tests {
     #[test]
     fn paste_settings_reach_the_paster() {
         let dir = tempfile::TempDir::new().unwrap();
-        let db = Arc::new(Mutex::new(
-            Database::open(&dir.path().join("t.sqlite"), false).unwrap(),
-        ));
+        let db_path = dir.path().join("t.sqlite");
+        let db = Arc::new(Mutex::new(Database::open(&db_path, false).unwrap()));
         let clip = Arc::new(NullClipboard::new());
         let ctx = AppContext::new(
             db,
@@ -374,6 +497,8 @@ mod tests {
             Arc::new(NullGlobalHotkey::new()),
             Settings::default(),
             None,
+            db_path,
+            Arc::new(fastpaste_platform::NullSecretStore::new()),
         );
         clip.set_text("orig").unwrap();
 
@@ -401,5 +526,53 @@ mod tests {
             "system",
             "mutating a snapshot must not touch the live settings"
         );
+    }
+
+    /// The whole point of the split: work out whether a passphrase is
+    /// needed without opening the database or claiming any device.
+    #[test]
+    fn probe_reports_the_encryption_state_of_a_plaintext_database() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fastpaste.sqlite");
+        drop(fastpaste_data::Database::open(&path, false).unwrap());
+
+        assert_eq!(
+            fastpaste_data::Database::encryption_state(&path).unwrap(),
+            fastpaste_data::EncryptionState::Plaintext
+        );
+    }
+
+    #[test]
+    fn a_context_built_with_a_key_reads_the_encrypted_database() {
+        use secrecy::SecretString;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fastpaste.sqlite");
+        let key = SecretString::from("s3cret".to_string());
+
+        {
+            let db = fastpaste_data::Database::open(&path, false).unwrap();
+            let mut item = fastpaste_data::Item::new_plain(0, "T", "B");
+            db.insert(&mut item).unwrap();
+        }
+        fastpaste_data::encrypt_database(&path, &key).unwrap();
+
+        let db = Arc::new(Mutex::new(
+            fastpaste_data::Database::open_with_key(&path, false, Some(&key)).unwrap(),
+        ));
+        let ctx = AppContext::new(
+            db,
+            Arc::new(NullClipboard::new()),
+            Arc::new(NullPasteKeys),
+            Arc::new(NullGlobalHotkey::new()),
+            Settings::default(),
+            None,
+            path.clone(),
+            Arc::new(fastpaste_platform::NullSecretStore::new()),
+        );
+
+        let loaded = ctx.db.lock().unwrap().load_all().unwrap();
+        assert_eq!(loaded[0].body_plain, "B");
+        assert_eq!(ctx.db_path, path, "conversions need the path");
     }
 }

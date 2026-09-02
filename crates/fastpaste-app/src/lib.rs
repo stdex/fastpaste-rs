@@ -7,7 +7,7 @@ pub mod paths;
 pub mod settings;
 
 pub use clipboard_history::{ClipboardHistory, HistoryEntry};
-pub use context::AppContext;
+pub use context::{AppContext, PASSPHRASE_ACCOUNT, StartupProbe};
 pub use paster::{PasteError, Paster};
 pub use settings::{
     ClipboardHistorySettings, GeneralSettings, HotkeySettings, PasteSettings, Settings,
