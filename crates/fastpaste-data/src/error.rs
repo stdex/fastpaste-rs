@@ -30,4 +30,10 @@ pub enum DataError {
 
     #[error("migration: {0}")]
     Migration(#[from] refinery::Error),
+
+    /// The file is encrypted and this build cannot open it. Only reachable
+    /// from a build that dropped the SQLCipher feature; reported
+    /// separately so it does not masquerade as corruption.
+    #[error("database is encrypted, but this build has no SQLCipher support")]
+    EncryptedButUnsupported,
 }

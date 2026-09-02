@@ -4,6 +4,7 @@ use std::path::Path;
 
 use rusqlite::Connection;
 
+use crate::crypto::EncryptionState;
 use crate::error::DataError;
 use crate::item::{Item, ItemKind};
 
@@ -99,6 +100,12 @@ impl Database {
         // is redundant, and harmlessly so.
         db.ensure_schema_current()?;
         Ok(db)
+    }
+
+    /// Whether the database at `path` needs a passphrase. Startup calls
+    /// this before deciding whether to prompt.
+    pub fn encryption_state(path: &Path) -> Result<EncryptionState, DataError> {
+        crate::crypto::encryption_state(path)
     }
 
     /// Refuse to use a database whose refinery version is newer than this
