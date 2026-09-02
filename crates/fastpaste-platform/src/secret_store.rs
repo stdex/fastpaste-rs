@@ -21,7 +21,7 @@ pub enum SecretStoreError {
     Unavailable(String),
 
     #[error("credential store failed: {0}")]
-    Backend(String),
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// One named secret in the OS credential store.
@@ -33,6 +33,14 @@ pub trait SecretStore: Send + Sync {
     /// Whether this store can be used at all. False on a Linux session
     /// with no Secret Service daemon, which is a degraded mode rather
     /// than a failure — the app prompts every launch instead.
+    ///
+    /// A `true` answer may be cached for the life of the store: a
+    /// credential store that has answered once will not stop existing
+    /// mid-session. A `false` answer must never be latched — the
+    /// underlying daemon can still be locked rather than absent (e.g.
+    /// early at login, before the session keyring is unlocked), and
+    /// that condition can clear on its own. Callers (the Options
+    /// dialog, in particular) rely on re-asking to notice that.
     fn is_available(&self) -> bool;
 
     fn get(&self, account: &str) -> Result<Option<SecretString>, SecretStoreError>;
@@ -85,6 +93,9 @@ impl SecretStore for NullSecretStore {
     }
 }
 
+/// Why every [`UnavailableSecretStore`] operation fails, said once.
+const NO_CREDENTIAL_STORE: &str = "no credential store on this session";
+
 /// What the app falls back to when the real store cannot be reached.
 /// Every operation fails, and [`SecretStore::is_available`] says so up
 /// front so the UI can explain itself instead of erroring on click.
@@ -97,21 +108,15 @@ impl SecretStore for UnavailableSecretStore {
     }
 
     fn get(&self, _account: &str) -> Result<Option<SecretString>, SecretStoreError> {
-        Err(SecretStoreError::Unavailable(
-            "no credential store on this session".into(),
-        ))
+        Err(SecretStoreError::Unavailable(NO_CREDENTIAL_STORE.into()))
     }
 
     fn set(&self, _account: &str, _secret: &SecretString) -> Result<(), SecretStoreError> {
-        Err(SecretStoreError::Unavailable(
-            "no credential store on this session".into(),
-        ))
+        Err(SecretStoreError::Unavailable(NO_CREDENTIAL_STORE.into()))
     }
 
     fn delete(&self, _account: &str) -> Result<(), SecretStoreError> {
-        Err(SecretStoreError::Unavailable(
-            "no credential store on this session".into(),
-        ))
+        Err(SecretStoreError::Unavailable(NO_CREDENTIAL_STORE.into()))
     }
 }
 
