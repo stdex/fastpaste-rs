@@ -158,8 +158,16 @@ fn export_to(conn: &Connection, dest: &Path, key: Option<&SecretString>) -> Resu
 }
 
 /// Best-effort durability before the rename that commits a conversion.
+///
+/// Opened for writing, not read-only: `sync_all` calls into Win32's
+/// `FlushFileBuffers` on Windows, which requires a handle opened with
+/// `GENERIC_WRITE`. A read-only handle fails there before ever reaching
+/// the rename.
 fn fsync_file(path: &Path) -> Result<(), DataError> {
-    std::fs::File::open(path)?.sync_all()?;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)?
+        .sync_all()?;
     Ok(())
 }
 
@@ -168,39 +176,66 @@ fn fsync_file(path: &Path) -> Result<(), DataError> {
 /// Never touches the original until the replacement has been opened under
 /// its new key and confirmed to hold the same number of items. A crash at
 /// any point before the rename leaves the original intact and an orphaned
-/// `.new` beside it, which [`clean_orphaned_conversion`] removes.
+/// `.new` beside it, which [`clean_orphaned_conversion`] removes. Every
+/// failure from the point `tmp` starts existing is funnelled through one
+/// cleanup so none of them can leave it behind either.
+///
+/// `after_export`, if given, is called with `tmp`'s path immediately
+/// after the export succeeds and before that file is reopened to verify
+/// it. It exists only so a test can reach that one gap — everything else
+/// in this function happens inside a single synchronous call with no
+/// other place to interject — and every real caller below passes `None`.
 ///
 /// Requires exclusive access to `path`: the caller must hold no open
-/// connection to it.
+/// connection to it. `path` must already exist — this converts a file
+/// in place, it does not create one.
 fn convert(
     path: &Path,
     from: Option<&SecretString>,
     to: Option<&SecretString>,
+    after_export: Option<&dyn Fn(&Path)>,
 ) -> Result<(), DataError> {
+    if !path.exists() {
+        return Err(DataError::NotFound(path.to_path_buf()));
+    }
+
     let tmp = conversion_temp_path(path);
     // A previous crash may have left one. It is not a backup of anything.
     let _ = std::fs::remove_file(&tmp);
 
-    let expected = {
-        // Not read-only: a connection opened read-only inherits that mode
-        // for whatever it ATTACHes too, and ATTACH must create `tmp`.
-        // Nothing here writes to `path` itself.
-        let src = open_keyed(path, false, from)?;
-        let n = item_count(&src)?;
-        export_to(&src, &tmp, to)?;
-        n
-    };
+    // One closure, one cleanup site: every fallible step below can `?`
+    // out of it without duplicating the "remove tmp" step at each call
+    // site, and none of them can therefore forget to.
+    let outcome = (|| -> Result<(), DataError> {
+        let expected = {
+            // Not read-only: a connection opened read-only inherits that
+            // mode for whatever it ATTACHes too, and ATTACH must create
+            // `tmp`. Nothing here writes to `path` itself.
+            let src = open_keyed(path, false, from)?;
+            let n = item_count(&src)?;
+            export_to(&src, &tmp, to)?;
+            if let Some(f) = after_export {
+                f(&tmp);
+            }
+            n
+        };
 
-    {
-        let dst = open_keyed(&tmp, true, to)?;
-        let got = item_count(&dst)?;
+        let got = {
+            let dst = open_keyed(&tmp, true, to)?;
+            item_count(&dst)?
+        };
         if got != expected {
-            let _ = std::fs::remove_file(&tmp);
             return Err(DataError::ConversionMismatch { expected, got });
         }
+
+        fsync_file(&tmp)
+    })();
+
+    if let Err(e) = outcome {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
     }
 
-    fsync_file(&tmp)?;
     // Atomic: same directory, therefore same filesystem. This both
     // installs the new file and destroys the old one — deliberately. A
     // `.bak` here would preserve exactly the readable copy that
@@ -214,7 +249,7 @@ fn convert(
 /// Requires exclusive access to `path`: the caller must hold no open
 /// connection to it.
 pub fn encrypt_database(path: &Path, passphrase: &SecretString) -> Result<(), DataError> {
-    convert(path, None, Some(passphrase))
+    convert(path, None, Some(passphrase), None)
 }
 
 /// Decrypt an encrypted database back to plaintext in place.
@@ -222,7 +257,7 @@ pub fn encrypt_database(path: &Path, passphrase: &SecretString) -> Result<(), Da
 /// Requires exclusive access to `path`: the caller must hold no open
 /// connection to it.
 pub fn decrypt_database(path: &Path, passphrase: &SecretString) -> Result<(), DataError> {
-    convert(path, Some(passphrase), None)
+    convert(path, Some(passphrase), None, None)
 }
 
 /// Change the passphrase of an already-encrypted database.
@@ -231,12 +266,18 @@ pub fn decrypt_database(path: &Path, passphrase: &SecretString) -> Result<(), Da
 /// `PRAGMA rekey` rewrites each page under the new key without an export.
 ///
 /// Requires exclusive access to `path`: the caller must hold no open
-/// connection to it.
+/// connection to it. `path` must already exist — `open_keyed`'s
+/// `SQLITE_OPEN_CREATE` flag would otherwise fabricate an empty database
+/// and "rekey" that instead of reporting the passphrase can't be checked
+/// against anything.
 pub fn change_passphrase(
     path: &Path,
     current: &SecretString,
     new: &SecretString,
 ) -> Result<(), DataError> {
+    if !path.exists() {
+        return Err(DataError::NotFound(path.to_path_buf()));
+    }
     let conn = open_keyed(path, false, Some(current))?;
     conn.pragma_update(None, "rekey", new.expose_secret())?;
     Ok(())
@@ -399,8 +440,15 @@ mod tests {
         assert_eq!(loaded.len(), 3);
         // `load_all` orders by (parent_id, order_index, id): the two
         // root items (Work, Address) sort before Token, which lives under
-        // the Work folder's non-zero parent_id.
-        assert!(loaded.iter().any(|i| i.body_plain == "abc123"));
+        // the Work folder's non-zero parent_id. Check every body rather
+        // than one index, so a corrupted "Work" or "Address" with an
+        // intact "Token" would still be caught.
+        let bodies: std::collections::BTreeSet<_> =
+            loaded.iter().map(|i| i.body_plain.as_str()).collect();
+        assert_eq!(
+            bodies,
+            std::collections::BTreeSet::from(["", "abc123", "1 High St"])
+        );
         assert_eq!(
             db.schema_version().unwrap(),
             Some(1),
@@ -518,5 +566,90 @@ mod tests {
             leftovers.is_empty(),
             "no copy of the database may remain: {leftovers:?}"
         );
+    }
+
+    /// `convert()` (behind `encrypt_database`/`decrypt_database`) must
+    /// refuse a path that doesn't exist rather than fabricate one:
+    /// `open_keyed`'s writable-open flags include `SQLITE_OPEN_CREATE`,
+    /// which would otherwise silently produce and "convert" an empty
+    /// database, and `database.rs` already reserves this exact situation
+    /// for `DataError::NotFound`.
+    #[test]
+    fn encrypting_a_missing_database_returns_not_found_and_creates_nothing() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope.sqlite");
+
+        let err = encrypt_database(&missing, &pass("s3cret")).unwrap_err();
+        assert!(
+            matches!(err, DataError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+        assert!(!missing.exists(), "must not fabricate a database file");
+        assert!(
+            !conversion_temp_path(&missing).exists(),
+            "must not leave a temp file behind either"
+        );
+    }
+
+    #[test]
+    fn decrypting_a_missing_database_returns_not_found() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope.sqlite");
+
+        let err = decrypt_database(&missing, &pass("s3cret")).unwrap_err();
+        assert!(
+            matches!(err, DataError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+        assert!(!missing.exists());
+    }
+
+    #[test]
+    fn changing_the_passphrase_of_a_missing_database_returns_not_found() {
+        let dir = TempDir::new().unwrap();
+        let missing = dir.path().join("nope.sqlite");
+
+        let err = change_passphrase(&missing, &pass("old"), &pass("new")).unwrap_err();
+        assert!(
+            matches!(err, DataError::NotFound(_)),
+            "expected NotFound, got {err:?}"
+        );
+        assert!(!missing.exists(), "must not fabricate a database file");
+    }
+
+    /// The riskiest branch in `convert()`: something goes wrong after the
+    /// export but before the temp file is trusted. This forces exactly
+    /// that, via `convert`'s `after_export` test seam, and checks all
+    /// three safety properties at once: the right error comes back, the
+    /// temp file is gone, and the original is completely unharmed.
+    #[test]
+    fn a_corrupted_export_rolls_back_and_leaves_the_original_intact() {
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let p = pass("s3cret");
+
+        let corrupt: &dyn Fn(&Path) = &|tmp: &Path| {
+            std::fs::write(tmp, b"not a database").unwrap();
+        };
+        let result = convert(&path, None, Some(&p), Some(corrupt));
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, DataError::WrongPassphrase),
+            "corruption surfaces as this build's stand-in for \"not a \
+             database\" when the verify-open fails; got {err:?}"
+        );
+
+        assert!(
+            !conversion_temp_path(&path).exists(),
+            "the corrupted temp file must not linger"
+        );
+        assert_eq!(
+            Database::encryption_state(&path).unwrap(),
+            EncryptionState::Plaintext,
+            "the original must be untouched by a failed conversion"
+        );
+        let db = Database::open(&path, false).unwrap();
+        assert_eq!(db.load_all().unwrap().len(), 3);
     }
 }
