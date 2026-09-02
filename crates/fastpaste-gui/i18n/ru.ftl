@@ -54,3 +54,12 @@ selection-empty = Пока нет фрагментов.
 selection-tag-history = История
 selection-hint = ↑↓ выбрать · Enter вставить · Esc закрыть
 selection-section-snippets = Фрагменты
+
+unlock-title = Разблокировать fastpaste
+unlock-prompt = База данных зашифрована. Введите пароль, чтобы открыть её.
+unlock-passphrase-label = Пароль:
+unlock-remember = Запомнить в системном хранилище ключей
+unlock-remember-unavailable = Запомнить в системном хранилище ключей (недоступно в этом сеансе)
+unlock-error-wrong = Неверный пароль.
+unlock-unlock = Разблокировать
+unlock-cancel = Отмена

@@ -53,3 +53,12 @@ selection-empty = Noch keine Schnipsel.
 selection-tag-history = Verlauf
 selection-hint = ↑↓ auswählen · Enter einfügen · Esc schließen
 selection-section-snippets = Schnipsel
+
+unlock-title = fastpaste entsperren
+unlock-prompt = Diese Datenbank ist verschlüsselt. Geben Sie Ihre Passphrase ein, um sie zu öffnen.
+unlock-passphrase-label = Passphrase:
+unlock-remember = Im Schlüsselbund des Systems merken
+unlock-remember-unavailable = Im Schlüsselbund des Systems merken (in dieser Sitzung nicht verfügbar)
+unlock-error-wrong = Falsche Passphrase.
+unlock-unlock = Entsperren
+unlock-cancel = Abbrechen

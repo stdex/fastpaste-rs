@@ -53,3 +53,12 @@ selection-empty = 还没有片段。
 selection-tag-history = 历史
 selection-hint = ↑↓ 选择 · Enter 粘贴 · Esc 关闭
 selection-section-snippets = 片段
+
+unlock-title = 解锁 fastpaste
+unlock-prompt = 此数据库已加密。请输入密码以打开。
+unlock-passphrase-label = 密码：
+unlock-remember = 记住到系统密钥环
+unlock-remember-unavailable = 记住到系统密钥环（当前会话不可用）
+unlock-error-wrong = 密码错误。
+unlock-unlock = 解锁
+unlock-cancel = 取消

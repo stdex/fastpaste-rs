@@ -53,3 +53,12 @@ selection-empty = Aún no hay fragmentos.
 selection-tag-history = Historial
 selection-hint = ↑↓ seleccionar · Enter pegar · Esc cerrar
 selection-section-snippets = Fragmentos
+
+unlock-title = Desbloquear fastpaste
+unlock-prompt = Esta base de datos está cifrada. Introduzca su contraseña para abrirla.
+unlock-passphrase-label = Contraseña:
+unlock-remember = Recordar en el llavero del sistema
+unlock-remember-unavailable = Recordar en el llavero del sistema (no disponible en esta sesión)
+unlock-error-wrong = Contraseña incorrecta.
+unlock-unlock = Desbloquear
+unlock-cancel = Cancelar

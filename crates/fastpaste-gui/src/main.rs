@@ -1801,6 +1801,15 @@ where
     t.set_tray_options(m("tray-options").into());
     t.set_tray_quit(m("tray-quit").into());
 
+    t.set_unlock_title(m("unlock-title").into());
+    t.set_unlock_prompt(m("unlock-prompt").into());
+    t.set_unlock_passphrase_label(m("unlock-passphrase-label").into());
+    t.set_unlock_remember(m("unlock-remember").into());
+    t.set_unlock_remember_unavailable(m("unlock-remember-unavailable").into());
+    t.set_unlock_error_wrong(m("unlock-error-wrong").into());
+    t.set_unlock_unlock(m("unlock-unlock").into());
+    t.set_unlock_cancel(m("unlock-cancel").into());
+
     t.set_options_title(m("options-title").into());
     t.set_options_general(m("options-general").into());
     t.set_options_hotkeys(m("options-hotkeys").into());

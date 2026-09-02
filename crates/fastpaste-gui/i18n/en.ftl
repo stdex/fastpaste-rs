@@ -60,3 +60,12 @@ selection-empty = No snippets yet.
 selection-tag-history = History
 selection-hint = ↑↓ select · Enter paste · Esc close
 selection-section-snippets = Snippets
+
+unlock-title = Unlock fastpaste
+unlock-prompt = This database is encrypted. Enter your passphrase to open it.
+unlock-passphrase-label = Passphrase:
+unlock-remember = Remember in the system keyring
+unlock-remember-unavailable = Remember in the system keyring (unavailable on this session)
+unlock-error-wrong = Wrong passphrase.
+unlock-unlock = Unlock
+unlock-cancel = Cancel

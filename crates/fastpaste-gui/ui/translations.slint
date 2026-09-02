@@ -74,4 +74,14 @@ export global Translations {
     // Virtual tree folder fed by the clipboard history ring buffer
     // (the label lives in the Rust-built tree model, not a binding).
     in-out property <string> clipboard-history-folder: "Clipboard History";
+
+    // Unlock dialog.
+    in-out property <string> unlock-title: "Unlock fastpaste";
+    in-out property <string> unlock-prompt: "This database is encrypted. Enter your passphrase to open it.";
+    in-out property <string> unlock-passphrase-label: "Passphrase:";
+    in-out property <string> unlock-remember: "Remember in the system keyring";
+    in-out property <string> unlock-remember-unavailable: "Remember in the system keyring (unavailable on this session)";
+    in-out property <string> unlock-error-wrong: "Wrong passphrase.";
+    in-out property <string> unlock-unlock: "Unlock";
+    in-out property <string> unlock-cancel: "Cancel";
 }

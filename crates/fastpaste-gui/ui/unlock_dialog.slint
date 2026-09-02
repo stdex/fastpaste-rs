@@ -1,0 +1,104 @@
+// Unlock Dialog: the passphrase prompt for an encrypted database.
+//
+// Shown before anything else exists — no tray, no hotkeys, no main
+// window — because none of them can do anything useful until the
+// database opens. The controller (main.rs) reads `passphrase` on
+// `unlock-clicked`, tries to open, and either proceeds or pushes a
+// message into `error-message` and leaves the dialog up.
+//
+// `remember-available` is false on a session with no credential store;
+// the checkbox is then disabled and the hint says why, rather than
+// failing on click.
+
+import { Button, LineEdit, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { Translations } from "translations.slint";
+// std-widgets' CheckBox does not wrap its label (see fluent/checkbox.slint:
+// a plain `Text` with no `wrap`), which clips the longest locale's
+// "unavailable" hint outright. FCheckBox is the in-house control used
+// throughout options_dialog.slint specifically because it sets
+// `wrap: word-wrap` on that label.
+import { FCheckBox } from "widgets.slint";
+
+export component UnlockDialog inherits Window {
+    title: Translations.unlock-title;
+
+    in-out property <string> passphrase: "";
+    in-out property <string> error-message: "";
+    in property <bool> remember-available: true;
+    in-out property <bool> remember: false;
+    in property <bool> busy: false;
+
+    callback unlock-clicked();
+    callback cancel-clicked();
+
+    // Enter submits from the text field; Escape cancels from anywhere.
+    forward-focus: pass-field;
+    FocusScope {
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.cancel-clicked();
+                return accept;
+            }
+            return reject;
+        }
+
+        VerticalBox {
+            padding: 16px;
+            spacing: 10px;
+
+            Text {
+                text: Translations.unlock-prompt;
+                wrap: word-wrap;
+                horizontal-alignment: left;
+            }
+
+            HorizontalBox {
+                padding: 0px;
+                spacing: 8px;
+                Text {
+                    text: Translations.unlock-passphrase-label;
+                    vertical-alignment: center;
+                }
+                pass-field := LineEdit {
+                    input-type: password;
+                    enabled: !root.busy;
+                    text <=> root.passphrase;
+                    accepted => { root.unlock-clicked(); }
+                }
+            }
+
+            FCheckBox {
+                text: root.remember-available
+                    ? Translations.unlock-remember
+                    : Translations.unlock-remember-unavailable;
+                enabled: root.remember-available && !root.busy;
+                checked <=> root.remember;
+            }
+
+            // Reserves no space when empty, so the dialog does not jump
+            // the first time a passphrase is wrong.
+            if root.error-message != "": Text {
+                text: root.error-message;
+                color: #c0392b;
+                wrap: word-wrap;
+            }
+
+            HorizontalBox {
+                padding: 0px;
+                spacing: 8px;
+                Rectangle { }   // pushes the buttons right
+                Button {
+                    text: Translations.unlock-cancel;
+                    enabled: !root.busy;
+                    clicked => { root.cancel-clicked(); }
+                }
+                Button {
+                    text: Translations.unlock-unlock;
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { root.unlock-clicked(); }
+                }
+            }
+        }
+    }
+}

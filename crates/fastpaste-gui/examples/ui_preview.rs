@@ -5,6 +5,7 @@
 //! "does this look right" is not a question the type checker answers.
 //!
 //!     cargo run --example ui_preview -- options 2 out.ppm
+//!     cargo run --example ui_preview -- unlock 1 out.ppm
 //!
 //! Writes a binary PPM (P6) — no image-encoder dependency; convert with
 //! `ffmpeg -i out.ppm out.png`.
@@ -46,6 +47,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (w, h) = match which.as_str() {
         "select" => (400u32, 340u32),
         "main" => (900, 520),
+        "unlock" => (420u32, 260u32),
         _ => (700, 460),
     };
 
@@ -53,6 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _keep: Box<dyn std::any::Any> = match which.as_str() {
         "options" => Box::new(build_options(page, ru)?),
         "select" => Box::new(build_selection(ru)?),
+        "unlock" => Box::new(build_unlock(page == 1, ru)?),
         _ => Box::new(build_main_with(page == 1, ru)?),
     };
 
@@ -202,6 +205,35 @@ fn build_selection(ru: bool) -> Result<SelectionDialog, slint::PlatformError> {
         t.set_selection_filter_placeholder("Введите для фильтрации".into());
         t.set_selection_hint("↑↓ выбрать · Enter вставить · Esc закрыть".into());
         t.set_selection_tag_history("История".into());
+    }
+    d.show()?;
+    Ok(d)
+}
+
+/// `page == 1` renders the wrong-passphrase state, which is the one
+/// worth looking at: the error text has to fit without pushing the
+/// buttons off the bottom in the widest locale.
+fn build_unlock(with_error: bool, ru: bool) -> Result<UnlockDialog, slint::PlatformError> {
+    let d = UnlockDialog::new()?;
+    d.set_passphrase("hunter2".into());
+    d.set_remember_available(false);
+    if with_error {
+        d.set_error_message("Wrong passphrase.".into());
+    }
+    if ru {
+        let t = Translations::get(&d);
+        t.set_unlock_title("Разблокировать fastpaste".into());
+        t.set_unlock_prompt("База данных зашифрована. Введите пароль, чтобы открыть её.".into());
+        t.set_unlock_passphrase_label("Пароль:".into());
+        t.set_unlock_remember_unavailable(
+            "Запомнить в системном хранилище ключей (недоступно в этом сеансе)".into(),
+        );
+        t.set_unlock_error_wrong("Неверный пароль.".into());
+        t.set_unlock_unlock("Разблокировать".into());
+        t.set_unlock_cancel("Отмена".into());
+        if with_error {
+            d.set_error_message("Неверный пароль.".into());
+        }
     }
     d.show()?;
     Ok(d)
