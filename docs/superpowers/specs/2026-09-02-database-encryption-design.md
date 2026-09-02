@@ -223,27 +223,43 @@ Prove it with a throwaway spike before implementing section 4; if it does
 not hold, the fallback is to keep the tray built pre-loop and gate its
 DB-dependent handlers on the locked state.
 
-**Spike result (2026-09-02) — Confirmed.** A throwaway example
-(`crates/fastpaste-gui/examples/loop_spike.rs`, deleted after the run) created
-a window and showed it before calling `slint::run_event_loop_until_quit()`,
-then — from a `slint::Timer` callback firing after the loop was already
-running — created and showed a *second* window, hid the first, and confirmed
-the loop was still alive before calling `slint::quit_event_loop()`. Run twice
-against the live Wayland session on the development machine (Slint 1.17.1);
-both runs printed all five PROBE lines in order and exited 0:
+**Spike result (2026-09-02) — Confirmed, on the actual construct.** A first
+pass at this spike used a plain `Window` for every probe and inferred, by
+extension, that a tray icon would behave the same way — review correctly
+rejected that inference, because `FastpasteTray` inherits `SystemTrayIcon`
+(`crates/fastpaste-gui/ui/tray_icon.slint:26`), a different Slint element
+with its own platform registration path. The spike was corrected to
+construct the app's real `FastpasteTray` component (via
+`slint::include_modules!()`, the same mechanism `main.rs` uses) directly, in
+place of the inference.
+
+A throwaway example (`crates/fastpaste-gui/examples/loop_spike.rs`, deleted
+after the run) created a plain window and showed it before calling
+`slint::run_event_loop_until_quit()`; then, from a `slint::Timer` callback
+firing after the loop was already running, it called `FastpasteTray::new()`
+followed by `.show()`, then separately created and showed a second plain
+window, hid the first, and confirmed the loop was still alive before calling
+`slint::quit_event_loop()`. Run twice against the live Wayland session on the
+development machine — which has a KDE `StatusNotifierWatcher` /
+`StatusNotifierHost` running, so a genuine tray daemon was present — on
+Slint 1.17.1; both runs printed all six PROBE lines in order and exited 0:
 
 ```
 PROBE 1: window created before the loop
 PROBE 2: shown before the loop
-PROBE 3: second window created + shown from inside the loop
-PROBE 4: loop still alive after the first window closed
-PROBE 5: loop exited via quit_event_loop
+PROBE 3: FastpasteTray (SystemTrayIcon) created + shown from inside the loop
+PROBE 4: second window created + shown from inside the loop
+PROBE 5: loop still alive after the first window closed
+PROBE 6: loop exited via quit_event_loop
 ```
 
-The assumption holds: a window can be created and shown before
-`run_event_loop_until_quit`, and further windows (and, by extension, a tray
-icon) can be created from a callback after the loop has started, without the
-loop exiting early. Task 9 proceeds as written: always call
+`FastpasteTray::new()` and `.show()` both succeeded from inside the
+post-loop-start callback (PROBE 3), and the loop continued running
+afterward and shut down cleanly on `quit_event_loop()` (PROBE 4-6). The
+assumption holds on direct observation of the real tray component, not by
+extension from a plain window: `SystemTrayIcon`-rooted components can be
+constructed and shown from a callback firing after the loop has started, on
+this platform. Task 9 proceeds as written: always call
 `run_event_loop_until_quit`, with the no-tray path calling `quit_event_loop()`
 explicitly from the main window's close handler.
 
