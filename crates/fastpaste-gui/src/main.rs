@@ -128,6 +128,25 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("zh_CN", "中文 (简体)"),
 ];
 
+/// Whether a failed unlock attempt (`AppContext::build_unlocked_from`'s
+/// `Err`) means the passphrase itself was wrong, as opposed to some other
+/// failure — a `CorruptSchema` from a newer build's database, a fatal
+/// `SystemClipboard::new()` failure, a plain I/O error — that happened to
+/// occur while a passphrase was being tried.
+///
+/// This is the one place that distinguishes the two, so both the unlock
+/// dialog (which must not tell the user their correct passphrase is wrong)
+/// and the stale-keyring-entry recovery (which must not delete a saved
+/// passphrase over an unrelated failure) can share it. A plain function
+/// rather than inline logic in a callback so it can be unit-tested
+/// headlessly without a dialog or an `AppContext`.
+fn is_wrong_passphrase(e: &anyhow::Error) -> bool {
+    matches!(
+        e.downcast_ref::<fastpaste_data::DataError>(),
+        Some(fastpaste_data::DataError::WrongPassphrase)
+    )
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -174,12 +193,25 @@ fn main() -> anyhow::Result<()> {
                 start_app(ctx.clone())?;
                 return run_loop(ctx);
             }
-            Err(e) => {
+            Err(e) if is_wrong_passphrase(&e) => {
                 // A remembered passphrase that no longer works is a stale
                 // entry, not a failure: drop it and ask, rather than
                 // leaving the user with an app that will not start.
                 tracing::warn!("the remembered passphrase did not work ({e}); clearing it");
                 let _ = store.delete(fastpaste_app::PASSPHRASE_ACCOUNT);
+            }
+            Err(e) => {
+                // Some other failure happened to occur on the path that
+                // tries the remembered passphrase — a transient clipboard
+                // fault, a full disk, a corrupt schema. It is not evidence
+                // the saved passphrase is wrong, so it must survive: a
+                // full-disk error is not a reason to permanently destroy
+                // the user's saved credential with only a `warn!`. Ask for
+                // the passphrase by hand instead of deleting anything.
+                tracing::warn!(
+                    "could not start with the remembered passphrase (not a passphrase \
+                     problem, keeping it): {e}"
+                );
             }
         }
     }
@@ -387,32 +419,87 @@ fn unlock_then_start(
                         let _ = slint::quit_event_loop();
                     }
                 }
-                Err(e) => {
-                    tracing::info!("unlock attempt rejected: {e}");
+                Err(e) if is_wrong_passphrase(&e) => {
+                    tracing::info!("unlock attempt rejected: wrong passphrase");
                     d.set_busy(false);
                     d.set_passphrase("".into());
                     d.set_error_message(i18n().msg("unlock-error-wrong").into());
+                }
+                Err(e) => {
+                    // Not a passphrase problem — a corrupt schema from a
+                    // newer build, a fatal SystemClipboard::new() failure,
+                    // an I/O fault. Retyping the same, correct, passphrase
+                    // cannot fix any of these, so re-prompting like a
+                    // wrong-passphrase case would just waste the user's
+                    // time (and, before this fix, tell them their correct
+                    // passphrase was wrong). Show the real error and end
+                    // the attempt via the same `failure`/`quit_event_loop`
+                    // plumbing the post-unlock `start_app` failure path
+                    // below already uses, rather than looping on a retry
+                    // that cannot succeed.
+                    tracing::error!("unlock attempt failed (not a passphrase problem): {e}");
+                    d.set_error_message(e.to_string().into());
+                    *failure.borrow_mut() = Some(e);
+                    let _ = slint::quit_event_loop();
                 }
             }
         });
     }
 
-    dialog.on_cancel_clicked(move || {
-        if unlocked.get() {
-            // A queued Escape that lost the race against a just-succeeded
-            // unlock attempt (see the comment on `unlocked` above): the
-            // app is already running, so this cancel does nothing.
-            return;
-        }
-        tracing::info!("unlock cancelled; exiting");
-        if let Some(d) = weak.upgrade() {
-            // Same reasoning as the success path: don't leave the
-            // passphrase sitting in a live SharedString.
-            d.set_passphrase("".into());
-            let _ = d.hide();
-        }
-        let _ = slint::quit_event_loop();
-    });
+    {
+        let unlocked = unlocked.clone();
+        let weak = weak.clone();
+        dialog.on_cancel_clicked(move || {
+            if unlocked.get() {
+                // A queued Escape that lost the race against a just-succeeded
+                // unlock attempt (see the comment on `unlocked` above): the
+                // app is already running, so this cancel does nothing.
+                return;
+            }
+            tracing::info!("unlock cancelled; exiting");
+            if let Some(d) = weak.upgrade() {
+                // Same reasoning as the success path: don't leave the
+                // passphrase sitting in a live SharedString.
+                d.set_passphrase("".into());
+                let _ = d.hide();
+            }
+            let _ = slint::quit_event_loop();
+        });
+    }
+
+    // Slint's default response to a window-close request (title-bar X,
+    // Alt+F4) is `CloseRequestResponse::HideWindow` — it does NOT quit the
+    // loop. `unlock_then_start` runs `run_event_loop_until_quit`, which by
+    // definition only returns once something calls `quit_event_loop()`, so
+    // without this handler the close gesture would hide the dialog and
+    // leave the process running with no window, no tray and no hotkeys —
+    // and the single-instance guard still held inside `probe`.
+    //
+    // Gated on the same `unlocked` latch as `on_cancel_clicked`, but NOT
+    // implemented by calling through to it: a close request queued while
+    // `on_unlock_clicked` was still running (the same race documented on
+    // `unlocked` above for Escape) would arrive here *after* the unlock
+    // already succeeded, the dialog was hidden, and `start_app` put the
+    // tray/hotkeys/main window up. Unconditionally quitting in that case
+    // would tear down the app that just started; checking the latch is
+    // what makes close-after-unlock a no-op while close-before-unlock still
+    // exits cleanly and lets `unlock_then_start` fall out of the loop and
+    // release the guard via `ui_state::release_all()`.
+    {
+        let unlocked = unlocked.clone();
+        let weak = weak.clone();
+        dialog.window().on_close_requested(move || {
+            if unlocked.get() {
+                return slint::CloseRequestResponse::HideWindow;
+            }
+            tracing::info!("unlock dialog closed; exiting");
+            if let Some(d) = weak.upgrade() {
+                d.set_passphrase("".into());
+            }
+            let _ = slint::quit_event_loop();
+            slint::CloseRequestResponse::HideWindow
+        });
+    }
 
     dialog.show()?;
     // Always the until-quit form here: the dialog may be the only window
@@ -1768,6 +1855,48 @@ fn clear_security_fields(d: &OptionsDialog) {
     d.set_security_confirm_passphrase("".into());
 }
 
+/// Seed every property on the Security page from live state: whether the
+/// database is currently encrypted, whether the credential store is
+/// reachable right now, whether a passphrase is currently remembered for
+/// it, and a clean status line.
+///
+/// Called both when the dialog is first constructed and every time an
+/// already-alive one is re-shown (`show_options_dialog`'s re-seed
+/// branch). The dialog is deliberately kept alive across `hide()`
+/// (`ui_state::keep_options`), so without the second call site these
+/// would only ever be set once per process: a credential store that was
+/// merely locked the first time Options was opened — the common
+/// early-login case `KeyringSecretStore` was rewritten to handle — would
+/// leave the Remember checkbox disabled for the rest of the session, and
+/// a leftover error would still be showing next time the page opens.
+fn seed_security_page(d: &OptionsDialog, ctx: &Arc<AppContext>) {
+    let encrypted = fastpaste_data::Database::encryption_state(&ctx.db_path)
+        .map(|s| s == EncryptionState::Encrypted)
+        .unwrap_or(false);
+    d.set_security_encrypted(encrypted);
+
+    let available = ctx.secret_store.is_available();
+    d.set_security_remember_available(available);
+
+    // Reflect whether a passphrase is actually remembered right now, so
+    // the encrypted-half checkbox opens in sync with the keyring rather
+    // than always starting unchecked. Plaintext has nothing to reflect
+    // (there is no passphrase yet), so it always starts unchecked there.
+    d.set_security_remember(
+        encrypted
+            && available
+            && ctx
+                .secret_store
+                .get(fastpaste_app::PASSPHRASE_ACCOUNT)
+                .ok()
+                .flatten()
+                .is_some(),
+    );
+
+    d.set_security_message("".into());
+    d.set_security_message_is_error(false);
+}
+
 // ---------------------------------------------------------------------------
 // Options Dialog
 // ---------------------------------------------------------------------------
@@ -1790,6 +1919,16 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
     // rejected.
     if let Some(d) = live(&OPTIONS_DIALOG) {
         seed_options_dialog(&d, &ctx.settings());
+        // The Security page has the same problem `seed_options_dialog`
+        // exists to solve, one layer deeper: credential-store
+        // availability and the encrypted/plaintext state were previously
+        // only ever set on the construction path below, so a store that
+        // was locked (the common early-login case) the first time this
+        // dialog opened stayed latched "unavailable" — and any leftover
+        // status message — for the rest of the session, even though the
+        // dialog is deliberately kept alive across `hide()`.
+        seed_security_page(&d, &ctx);
+        clear_security_fields(&d);
         d.set_status_message("".into());
         let _ = d.show();
         return;
@@ -1825,12 +1964,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
     // every conversion needs the database closed, which is why each of
     // these takes the mutex and replaces the `Database` inside it rather
     // than working through an open handle.
-    dialog.set_security_encrypted(
-        fastpaste_data::Database::encryption_state(&ctx.db_path)
-            .map(|s| s == EncryptionState::Encrypted)
-            .unwrap_or(false),
-    );
-    dialog.set_security_remember_available(ctx.secret_store.is_available());
+    seed_security_page(&dialog, &ctx);
 
     {
         let ctx = ctx.clone();
@@ -1845,11 +1979,13 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             match validate_security_fields(SecurityOp::Encrypt, "", &new, &confirm) {
                 SecurityValidation::Empty => {
                     d.set_security_message(i18n().msg("options-security-empty").into());
+                    d.set_security_message_is_error(true);
                     clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Mismatch => {
                     d.set_security_message(i18n().msg("options-security-mismatch").into());
+                    d.set_security_message_is_error(true);
                     clear_security_fields(&d);
                     return;
                 }
@@ -1874,8 +2010,12 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
                     }
                     d.set_security_encrypted(true);
                     d.set_security_message(i18n().msg("options-security-done-encrypted").into());
+                    d.set_security_message_is_error(false);
                 }
-                Err(e) => d.set_security_message(security_error_message(&e).into()),
+                Err(e) => {
+                    d.set_security_message(security_error_message(&e).into());
+                    d.set_security_message_is_error(true);
+                }
             }
             clear_security_fields(&d);
         });
@@ -1892,11 +2032,13 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             match validate_security_fields(SecurityOp::Change, &current, &new, &confirm) {
                 SecurityValidation::Empty => {
                     d.set_security_message(i18n().msg("options-security-empty").into());
+                    d.set_security_message_is_error(true);
                     clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Mismatch => {
                     d.set_security_message(i18n().msg("options-security-mismatch").into());
+                    d.set_security_message_is_error(true);
                     clear_security_fields(&d);
                     return;
                 }
@@ -1910,6 +2052,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             // doc for the strand this prevents.
             if let Err(e) = verify_current_passphrase(&ctx.db_path, &current) {
                 d.set_security_message(security_error_message(&e).into());
+                d.set_security_message_is_error(true);
                 clear_security_fields(&d);
                 return;
             }
@@ -1940,8 +2083,12 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
                         tracing::warn!("could not update the remembered passphrase: {e}");
                     }
                     d.set_security_message(i18n().msg("options-security-done-changed").into());
+                    d.set_security_message_is_error(false);
                 }
-                Err(e) => d.set_security_message(security_error_message(&e).into()),
+                Err(e) => {
+                    d.set_security_message(security_error_message(&e).into());
+                    d.set_security_message_is_error(true);
+                }
             }
             clear_security_fields(&d);
         });
@@ -1956,6 +2103,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             match validate_security_fields(SecurityOp::Remove, &current, "", "") {
                 SecurityValidation::Empty => {
                     d.set_security_message(i18n().msg("options-security-empty").into());
+                    d.set_security_message_is_error(true);
                     clear_security_fields(&d);
                     return;
                 }
@@ -1969,6 +2117,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             // doc for the strand this prevents.
             if let Err(e) = verify_current_passphrase(&ctx.db_path, &current) {
                 d.set_security_message(security_error_message(&e).into());
+                d.set_security_message_is_error(true);
                 clear_security_fields(&d);
                 return;
             }
@@ -1981,16 +2130,105 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             ) {
                 Ok(()) => {
                     // The entry now unlocks nothing. Leaving it would sit
-                    // a live passphrase in the keyring for no reason.
-                    if let Err(e) = ctx.secret_store.delete(fastpaste_app::PASSPHRASE_ACCOUNT) {
-                        tracing::warn!("could not clear the remembered passphrase: {e}");
+                    // a live passphrase in the keyring for no reason. A
+                    // failure here must not be swallowed behind a
+                    // cheerful "Encryption removed." — the passphrase is
+                    // still sitting in the credential store either way,
+                    // so say so on the same status line.
+                    match ctx.secret_store.delete(fastpaste_app::PASSPHRASE_ACCOUNT) {
+                        Ok(()) => {
+                            d.set_security_message(
+                                i18n().msg("options-security-done-removed").into(),
+                            );
+                            d.set_security_message_is_error(false);
+                        }
+                        Err(e) => {
+                            tracing::warn!("could not clear the remembered passphrase: {e}");
+                            d.set_security_message(
+                                format!(
+                                    "{} {}",
+                                    i18n().msg("options-security-done-removed"),
+                                    i18n().msg("options-security-forget-failed"),
+                                )
+                                .into(),
+                            );
+                            d.set_security_message_is_error(true);
+                        }
                     }
                     d.set_security_encrypted(false);
-                    d.set_security_message(i18n().msg("options-security-done-removed").into());
                 }
-                Err(e) => d.set_security_message(security_error_message(&e).into()),
+                Err(e) => {
+                    d.set_security_message(security_error_message(&e).into());
+                    d.set_security_message_is_error(true);
+                }
             }
             clear_security_fields(&d);
+        });
+    }
+
+    // Remember/forget an already-encrypted database's passphrase. Only
+    // reachable on the encrypted half (see options_dialog.slint) and
+    // only wired up here — this is the one path to withdraw a stored
+    // passphrase (or add one after the fact) without decrypting the
+    // whole library, which previously required decrypting it.
+    {
+        let ctx = ctx.clone();
+        let weak = dialog.as_weak();
+        dialog.on_security_remember_toggled(move || {
+            let Some(d) = weak.upgrade() else { return };
+            if d.get_security_remember() {
+                // Checked: the keyring stores the passphrase itself
+                // (design doc section 3), not a derived key we could
+                // pull off the live connection, so this needs it typed
+                // in and verified first — the same requirement Change
+                // and Remove already impose.
+                let current = d.get_security_current_passphrase().to_string();
+                if current.is_empty() {
+                    d.set_security_message(
+                        i18n().msg("options-security-remember-needs-current").into(),
+                    );
+                    d.set_security_message_is_error(true);
+                    d.set_security_remember(false);
+                    return;
+                }
+                let current = secrecy::SecretString::from(current);
+                if let Err(e) = verify_current_passphrase(&ctx.db_path, &current) {
+                    d.set_security_message(security_error_message(&e).into());
+                    d.set_security_message_is_error(true);
+                    d.set_security_remember(false);
+                    clear_security_fields(&d);
+                    return;
+                }
+                if let Err(e) = ctx
+                    .secret_store
+                    .set(fastpaste_app::PASSPHRASE_ACCOUNT, &current)
+                {
+                    tracing::warn!("could not remember the passphrase: {e}");
+                    d.set_security_message(i18n().msg("options-security-remember-failed").into());
+                    d.set_security_message_is_error(true);
+                    d.set_security_remember(false);
+                    clear_security_fields(&d);
+                    return;
+                }
+                d.set_security_message(i18n().msg("options-security-remember-done").into());
+                d.set_security_message_is_error(false);
+                clear_security_fields(&d);
+            } else {
+                // Unchecked: forget it. No passphrase is needed to
+                // delete a keyring entry.
+                if let Err(e) = ctx.secret_store.delete(fastpaste_app::PASSPHRASE_ACCOUNT) {
+                    tracing::warn!("could not forget the remembered passphrase: {e}");
+                    d.set_security_message(i18n().msg("options-security-forget-failed").into());
+                    d.set_security_message_is_error(true);
+                    // The delete failed, so the entry (if any) is
+                    // presumably still there — reflect that rather than
+                    // showing an unchecked box that lied about it.
+                    d.set_security_remember(true);
+                    return;
+                }
+                d.set_security_message(i18n().msg("options-security-forget-done").into());
+                d.set_security_message_is_error(false);
+            }
         });
     }
 
@@ -2000,6 +2238,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
     dialog.on_ok_clicked(move || {
         if let Some(d) = weak_ok.upgrade() {
             apply_options(&ctx_ok, &d);
+            clear_security_fields(&d);
             let _ = d.hide();
         }
     });
@@ -2010,6 +2249,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
     dialog.on_apply_clicked(move || {
         if let Some(d) = weak_apply.upgrade() {
             apply_options(&ctx_apply, &d);
+            clear_security_fields(&d);
         }
     });
 
@@ -2017,6 +2257,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
     let weak_cancel = dialog.as_weak();
     dialog.on_cancel_clicked(move || {
         if let Some(d) = weak_cancel.upgrade() {
+            clear_security_fields(&d);
             let _ = d.hide();
         }
     });
@@ -2366,11 +2607,19 @@ where
     t.set_options_security_change(m("options-security-change").into());
     t.set_options_security_remove(m("options-security-remove").into());
     t.set_options_security_warning(m("options-security-warning").into());
+    t.set_options_security_warning_forgotten(m("options-security-warning-forgotten").into());
     t.set_options_security_mismatch(m("options-security-mismatch").into());
     t.set_options_security_empty(m("options-security-empty").into());
     t.set_options_security_done_encrypted(m("options-security-done-encrypted").into());
     t.set_options_security_done_changed(m("options-security-done-changed").into());
     t.set_options_security_done_removed(m("options-security-done-removed").into());
+    t.set_options_security_remember_needs_current(
+        m("options-security-remember-needs-current").into(),
+    );
+    t.set_options_security_remember_failed(m("options-security-remember-failed").into());
+    t.set_options_security_remember_done(m("options-security-remember-done").into());
+    t.set_options_security_forget_failed(m("options-security-forget-failed").into());
+    t.set_options_security_forget_done(m("options-security-forget-done").into());
 
     t.set_confirm_delete_title(m("confirm-delete-title").into());
     t.set_confirm_yes(m("confirm-yes").into());
@@ -2960,5 +3209,48 @@ mod tests {
             got: 1,
         };
         assert_eq!(security_error_message(&e), format!("{e}"));
+    }
+
+    // ---- is_wrong_passphrase -------------------------------------------
+    //
+    // This is the exact decision that used to be missing: every
+    // `build_unlocked_from` failure landed in one arm and told the user
+    // their correct passphrase was wrong. Pinned here as a plain function
+    // over `anyhow::Error` so the discrimination itself is covered without
+    // a dialog or a real `AppContext`.
+
+    #[test]
+    fn wrong_passphrase_is_recognised() {
+        let e = anyhow::Error::new(fastpaste_data::DataError::WrongPassphrase);
+        assert!(is_wrong_passphrase(&e));
+    }
+
+    #[test]
+    fn a_corrupt_schema_is_not_a_wrong_passphrase() {
+        let e = anyhow::Error::new(fastpaste_data::DataError::CorruptSchema {
+            found: Some(1),
+            expected: 2,
+        });
+        assert!(!is_wrong_passphrase(&e));
+    }
+
+    #[test]
+    fn a_conversion_mismatch_is_not_a_wrong_passphrase() {
+        let e = anyhow::Error::new(fastpaste_data::DataError::ConversionMismatch {
+            expected: 3,
+            got: 1,
+        });
+        assert!(!is_wrong_passphrase(&e));
+    }
+
+    /// A failure that never carries a `DataError` at all — e.g. a fatal
+    /// `SystemClipboard::new()` error surfacing through `?` inside
+    /// `build_unlocked_from` — must not be mistaken for a wrong passphrase
+    /// either. Any `std::error::Error` stands in for that here; the point
+    /// is that `downcast_ref` finds nothing and the answer is `false`.
+    #[test]
+    fn a_non_data_error_is_not_a_wrong_passphrase() {
+        let e = anyhow::Error::new(std::io::Error::other("clipboard backend unavailable"));
+        assert!(!is_wrong_passphrase(&e));
     }
 }

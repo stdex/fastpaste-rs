@@ -307,9 +307,9 @@ Extends the degraded-modes table in `README.md`:
 | Situation | Effect |
 |---|---|
 | No Secret Service / Credential Manager | *Remember* disabled with a stated reason; passphrase prompted every launch |
-| Keyring holds a stale passphrase | Open fails, the stale entry is cleared, the prompt is shown — not a hard error |
+| Keyring holds a stale passphrase | Open fails **with `WrongPassphrase`**, the stale entry is cleared, the prompt is shown — not a hard error. A failed open for any other reason (a corrupt schema from a newer build, a fatal platform-backend failure, an I/O fault) does *not* mean the passphrase was wrong, and must not be treated as a stale entry: the keyring is left untouched and the real error is surfaced instead |
 | Wrong passphrase at the prompt | Inline error, retry. No lockout counter: an attacker holding the file ignores our UI, so a counter only punishes the legitimate user |
-| Prompt cancelled | Clean exit; the single-instance guard is released |
+| Prompt cancelled | Clean exit; the single-instance guard is released. The same applies to the window-close gesture (title-bar close, Alt+F4) — it is not a distinct case from Cancel/Escape, and must not leave the process running with the dialog hidden and the guard still held |
 | Encrypted database, build without SQLCipher | Reported as "encrypted database, this build lacks SQLCipher support", not as corrupt schema |
 | Crash mid-conversion | Original intact; orphaned `.new` removed on next launch |
 | Forgotten passphrase | Unrecoverable. Stated plainly where the passphrase is set, not only in documentation |
@@ -351,4 +351,11 @@ CI: the `windows-latest` job from section 1.
 6. *Remove encryption…* requires the current passphrase and restores a
    file the `sqlite3` CLI can read.
 7. Killing the app mid-conversion leaves a database that still opens.
+   This holds unconditionally for *Encrypt* and *Remove encryption*: both
+   are export-then-atomic-rename (section 5), so a crash at any point
+   before the rename leaves the original untouched and only an orphaned
+   `.new` behind, which the next launch removes. *Change passphrase…* is
+   different — it is an in-place `PRAGMA rekey` with no export and no
+   rename to roll back to, so its crash-safety rests entirely on
+   SQLCipher's own journal, not on the rollback mechanism described here.
 8. The workspace builds and its tests pass on both Linux and Windows CI.

@@ -84,7 +84,14 @@ rather than silently reverted.
   a passphrase you set in Options → Security. Off by default; you can turn
   it on and off again at any time. The passphrase can be remembered in the
   system keyring so launches stay silent, and there is no way to recover a
-  forgotten one
+  forgotten one. Two things worth knowing before you rely on it: the threat
+  model is someone who obtains the database *file* (a backup, a synced
+  folder, a stolen disk), not code already running as you — so (1)
+  encrypting an existing library deletes the plaintext original, but on an
+  SSD or a copy-on-write/journalling filesystem that is not secure erasure,
+  and its previous contents may still be recoverable from the raw device;
+  and (2) the keyring stores the passphrase itself, so any process running
+  as you, not only fastpaste, can read a remembered one
 
 ### Degraded modes
 
@@ -98,8 +105,8 @@ The app starts and stays useful when a piece of the desktop is missing:
 | A readable `config.toml` | The unreadable file is moved to `config.toml.bak` and defaults are used, rather than failing to start |
 | A decodable database row | The row is skipped and logged; the rest of the library still loads |
 | A credential store (Secret Service / Credential Manager) | Only matters with an encrypted database: the passphrase cannot be remembered, so it is prompted at every launch. The *Remember* checkbox is disabled and says why |
-| A correct passphrase on the first try, for an encrypted database | The unlock dialog stays up with a "wrong passphrase" message; cancelling exits cleanly and releases the single-instance guard |
-| A remembered passphrase that no longer works | The stale keyring entry is cleared and the dialog is shown, rather than the app refusing to start |
+| A correct passphrase on the first try, for an encrypted database | A wrong passphrase re-prompts with a localized "wrong passphrase" message. Any other failure (a corrupt schema from a newer build, a fatal platform-backend error) shows the real error instead of blaming the passphrase, since retyping the same correct one cannot fix it. Cancelling, or closing the dialog's window, exits cleanly and releases the single-instance guard |
+| A remembered passphrase that no longer works | The stale keyring entry is cleared and the dialog is shown, rather than the app refusing to start — but only when the failure was actually a wrong passphrase. Any other failure (a transient backend fault, a full disk) leaves the saved passphrase alone and just falls back to the prompt |
 | A clean shutdown during an encrypt / change / remove conversion | The original file is untouched — nothing is written to it until the replacement has been verified — and the partial `<name>.sqlite.new` left behind by the crash is deleted automatically at the next launch |
 | A way to recover a forgotten passphrase | None exists. Options → Security says so before you ever set one |
 

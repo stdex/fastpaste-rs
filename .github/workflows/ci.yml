@@ -1,7 +1,9 @@
 name: CI
 
-# The app is Linux-only in v1 (evdev, wl-clipboard-watch, XGrabKey on
-# XWayland), so CI runs on Linux only.
+# The Linux job is the primary target (evdev, wl-clipboard-watch, XGrabKey
+# on XWayland) and runs the full test suite headlessly. The `windows` job
+# below builds the workspace and runs its tests too — mainly so a change
+# like the SQLCipher/OpenSSL cross-build does not break Windows silently.
 
 on:
   push:

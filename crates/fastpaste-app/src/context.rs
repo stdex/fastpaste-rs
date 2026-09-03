@@ -358,15 +358,14 @@ impl AppContext {
             }
         };
 
+        // `SystemSecretStore::new()` no longer probes eagerly (Task 6), so
+        // this is cheap even for a plaintext database that never opts in —
+        // no D-Bus round trip here. Availability is asked for only by the
+        // two callers that actually need the answer (the unlock path and
+        // the Options dialog's Security page), each at the moment it
+        // matters, rather than unconditionally on every launch.
         let secret_store: Arc<dyn fastpaste_platform::SecretStore> =
             Arc::new(fastpaste_platform::SystemSecretStore::new());
-        if !secret_store.is_available() {
-            tracing::warn!(
-                "no credential store available at startup; \
-                 an encrypted database will prompt until one appears \
-                 (this is re-checked live, not latched)"
-            );
-        }
 
         tracing::info!(
             "loaded settings: paste.delay_ms={}, paste.restore_clipboard={}, \

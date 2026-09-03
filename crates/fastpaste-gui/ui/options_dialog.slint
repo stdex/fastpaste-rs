@@ -124,10 +124,21 @@ export component OptionsDialog inherits Window {
     in-out property <bool> security-remember;
     in property <bool> security-remember-available;
     in-out property <string> security-message;
+    // Whether `security-message` reports a failure. The unlock dialog
+    // paints its error red; this page used to paint every status line —
+    // "Passphrase changed." and "Wrong passphrase." alike — in the same
+    // body colour, which read as a confirmation either way.
+    in property <bool> security-message-is-error;
 
     callback security-encrypt-clicked();
     callback security-change-clicked();
     callback security-remove-clicked();
+    // Fired after the encrypted-half Remember checkbox's own `checked`
+    // has already flipped (see FCheckBox's `toggled`). The controller
+    // reads `security-remember` to see which way it went: checking it
+    // stores `security-current-passphrase` (verified first) in the
+    // keyring, unchecking it deletes the entry.
+    callback security-remember-toggled();
 
     // -- Navigation -----------------------------------------------------------
     in-out property <int> active-page: 0;
@@ -431,6 +442,27 @@ export component OptionsDialog inherits Window {
                                 }
                             }
 
+                            // Remember/forget an already-encrypted
+                            // database's passphrase. Checking this needs
+                            // `security-current-passphrase` filled in —
+                            // the same requirement Change/Remove impose —
+                            // because the keyring stores the passphrase
+                            // itself (design doc section 3), not a
+                            // derived key the controller could pull out
+                            // of the live connection.
+                            FCheckBox {
+                                text: root.security-remember-available
+                                    ? Translations.unlock-remember
+                                    : Translations.unlock-remember-unavailable;
+                                enabled: root.security-remember-available;
+                                checked <=> root.security-remember;
+                                toggled => { root.security-remember-toggled(); }
+                            }
+
+                            FHint {
+                                text: Translations.options-security-warning-forgotten;
+                            }
+
                             HorizontalLayout {
                                 spacing: Theme.spacing;
                                 FButton {
@@ -449,7 +481,7 @@ export component OptionsDialog inherits Window {
                             text: root.security-message;
                             wrap: word-wrap;
                             font-size: Theme.font-size;
-                            color: Theme.text;
+                            color: root.security-message-is-error ? #c0392b : Theme.text;
                         }
                     }
                 }

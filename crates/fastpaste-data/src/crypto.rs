@@ -137,7 +137,20 @@ fn item_count(conn: &Connection) -> Result<i64, DataError> {
 /// header itself is part of what changes. It copies the whole schema,
 /// `refinery_schema_history` included, so migration state survives.
 fn export_to(conn: &Connection, dest: &Path, key: Option<&SecretString>) -> Result<(), DataError> {
-    let dest_str = dest.to_string_lossy().to_string();
+    // `to_string_lossy` would silently ATTACH at a *different*, mangled
+    // path on a non-UTF-8 `dest` while `convert`'s verify-open and rename
+    // still use the exact `Path` — the conversion then fails safe (the
+    // rename target never got written), but leaves the lossy-named file
+    // behind as an orphan `clean_orphaned_conversion` cannot find, because
+    // it only ever looks for the exact `Path` with `.new` appended. For a
+    // decrypt, that orphan is a complete plaintext copy of the library.
+    // Fail before ATTACH ever runs instead.
+    let dest_str = dest.to_str().ok_or_else(|| {
+        DataError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("destination path is not valid UTF-8: {}", dest.display()),
+        ))
+    })?;
     // An empty key means "plaintext" to ATTACH — that is the documented
     // way back out, not an oversight.
     let key_str = key
@@ -177,8 +190,12 @@ fn fsync_file(path: &Path) -> Result<(), DataError> {
 /// its new key and confirmed to hold the same number of items. A crash at
 /// any point before the rename leaves the original intact and an orphaned
 /// `.new` beside it, which [`clean_orphaned_conversion`] removes. Every
-/// failure from the point `tmp` starts existing is funnelled through one
-/// cleanup so none of them can leave it behind either.
+/// failure from the point `tmp` starts existing *up to the rename* is
+/// funnelled through one cleanup, so none of them can leave it behind
+/// either — except a failed `std::fs::rename` itself, which sits outside
+/// that closure by necessity (it is what commits the conversion) and so
+/// is not covered by it; a `.new` left behind by that case is exactly
+/// what `clean_orphaned_conversion` exists to pick up on the next launch.
 ///
 /// `after_export`, if given, is called with `tmp`'s path immediately
 /// after the export succeeds and before that file is reopened to verify
@@ -212,6 +229,19 @@ fn convert(
             // mode for whatever it ATTACHes too, and ATTACH must create
             // `tmp`. Nothing here writes to `path` itself.
             let src = open_keyed(path, false, from)?;
+            // `sqlcipher_export` rebuilds every index on `tmp`, and
+            // SQLite's sorter can spill an in-progress sort to a file in
+            // the system temp directory when the working set is large.
+            // During an ENCRYPT that would be plaintext index data
+            // written outside the data directory — precisely the
+            // "plaintext lands in a temp file" leak the design doc cites
+            // when it rejects the encrypted-container-decrypted-on-unlock
+            // alternative. `temp_store` is not a cipher pragma (only
+            // `key`, `rekey`, `cipher_version` are), so setting it here
+            // does not violate the stock-SQLCipher-parameters rule.
+            // 2 = MEMORY (0 = DEFAULT, 1 = FILE); an integer avoids any
+            // ambiguity in how the keyword would otherwise be quoted.
+            src.pragma_update(None, "temp_store", 2i64)?;
             let n = item_count(&src)?;
             export_to(&src, &tmp, to)?;
             if let Some(f) = after_export {
@@ -602,6 +632,34 @@ mod tests {
             "expected NotFound, got {err:?}"
         );
         assert!(!missing.exists());
+    }
+
+    /// `export_to` must reject a destination that cannot round-trip through
+    /// UTF-8 rather than silently `ATTACH`ing at a `to_string_lossy`-mangled
+    /// path — see the comment on `export_to` for why that orphan matters
+    /// (a complete plaintext copy, on a decrypt, that the cleanup on the
+    /// next launch cannot find because it looks for the exact path).
+    #[cfg(unix)]
+    #[test]
+    fn export_to_rejects_a_non_utf8_destination() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = TempDir::new().unwrap();
+        let path = seeded(&dir, "lib.sqlite");
+        let conn = open_keyed(&path, false, None).unwrap();
+
+        let bad_name = std::ffi::OsStr::from_bytes(b"bad-\xff-name.sqlite");
+        let dest = dir.path().join(bad_name);
+
+        let err = export_to(&conn, &dest, None).unwrap_err();
+        assert!(
+            matches!(err, DataError::Io(_)),
+            "expected an Io error rejecting the non-UTF-8 path, got {err:?}"
+        );
+        assert!(
+            !dest.exists(),
+            "must fail before ATTACH ever creates anything"
+        );
     }
 
     #[test]

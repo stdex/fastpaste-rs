@@ -179,10 +179,26 @@ fn build_options(page: i32, ru: bool) -> Result<OptionsDialog, slint::PlatformEr
              содержимое всё ещё может быть восстановлено с самого устройства."
                 .into(),
         );
+        t.set_options_security_warning_forgotten("Забытый пароль восстановить невозможно.".into());
         t.set_unlock_remember("Запомнить в системном хранилище ключей".into());
         t.set_unlock_remember_unavailable(
             "Запомнить в системном хранилище ключей (недоступно в этом сеансе)".into(),
         );
+    }
+
+    if page == 5 {
+        // Encrypted half: check the Remember box and show a failure-styled
+        // status line, so this preview actually exercises the two things
+        // the final fix wave added here (the Remember control and the
+        // error/success colour split) rather than only the unchanged
+        // change/remove fields.
+        d.set_security_remember(true);
+        d.set_security_message(if ru {
+            "Неверный пароль.".into()
+        } else {
+            slint::SharedString::from("Wrong passphrase.")
+        });
+        d.set_security_message_is_error(true);
     }
 
     d.set_active_page(if page == 5 { 4 } else { page });
