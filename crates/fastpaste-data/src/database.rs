@@ -121,6 +121,19 @@ impl Database {
         crate::crypto::encryption_state(path)
     }
 
+    /// An empty database that lives only in RAM, migrated like any other.
+    ///
+    /// Exists so a caller that must close the real connection — the
+    /// whole-file conversions in [`crate::crypto`] — has something valid
+    /// to park in its slot meanwhile.
+    pub fn open_in_memory() -> Result<Self, DataError> {
+        let mut conn = Connection::open_in_memory()?;
+        migrations::runner().run(&mut conn)?;
+        let db = Self { conn };
+        db.ensure_schema_current()?;
+        Ok(db)
+    }
+
     /// Refuse to use a database whose refinery version is newer than this
     /// build — an older binary reading a newer schema would silently
     /// misinterpret rows.
@@ -638,6 +651,12 @@ mod tests {
         } // db dropped, file closed
 
         let db = Database::open(&path, false).unwrap();
+        assert_eq!(db.schema_version().unwrap(), Some(1));
+    }
+
+    #[test]
+    fn an_in_memory_database_migrates_like_any_other() {
+        let db = Database::open_in_memory().unwrap();
         assert_eq!(db.schema_version().unwrap(), Some(1));
     }
 

@@ -5,6 +5,8 @@
 //! "does this look right" is not a question the type checker answers.
 //!
 //!     cargo run --example ui_preview -- options 2 out.ppm
+//!     cargo run --example ui_preview -- options 4 out.ppm   # Security, plaintext
+//!     cargo run --example ui_preview -- options 5 out.ppm   # Security, encrypted
 //!     cargo run --example ui_preview -- unlock 1 out.ppm
 //!
 //! Writes a binary PPM (P6) — no image-encoder dependency; convert with
@@ -150,7 +152,40 @@ fn build_options(page: i32, ru: bool) -> Result<OptionsDialog, slint::PlatformEr
     d.set_paste_delay_min(0);
     d.set_paste_delay_max(5000);
     d.set_paste_restore_clipboard(true);
-    d.set_active_page(page);
+
+    // Security page (page index 4 in the dialog). `page == 5` is this
+    // preview's own convention for rendering the *encrypted* half of that
+    // one page; `page == 4` renders it plaintext. Both map to
+    // `active_page == 4` in the Slint component itself.
+    d.set_security_encrypted(page == 5);
+    d.set_security_remember_available(true);
+    if ru {
+        let t = Translations::get(&d);
+        t.set_options_security("Безопасность".into());
+        t.set_options_security_state_plaintext(
+            "База данных не зашифрована. Любой, кто может прочитать файл, увидит ваши записи."
+                .into(),
+        );
+        t.set_options_security_state_encrypted("База данных зашифрована.".into());
+        t.set_options_security_current_label("Текущий пароль:".into());
+        t.set_options_security_new_label("Новый пароль:".into());
+        t.set_options_security_confirm_label("Подтверждение:".into());
+        t.set_options_security_encrypt("Зашифровать базу данных".into());
+        t.set_options_security_change("Сменить пароль".into());
+        t.set_options_security_remove("Снять шифрование".into());
+        t.set_options_security_warning(
+            "Забытый пароль восстановить невозможно. Шифрование защищает файл с этого момента: \
+             незашифрованная копия удаляется, но на SSD или журналируемой файловой системе её \
+             содержимое всё ещё может быть восстановлено с самого устройства."
+                .into(),
+        );
+        t.set_unlock_remember("Запомнить в системном хранилище ключей".into());
+        t.set_unlock_remember_unavailable(
+            "Запомнить в системном хранилище ключей (недоступно в этом сеансе)".into(),
+        );
+    }
+
+    d.set_active_page(if page == 5 { 4 } else { page });
     d.show()?;
     Ok(d)
 }

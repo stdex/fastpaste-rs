@@ -80,6 +80,11 @@ rather than silently reverted.
 - System tray icon with context menu (Slint native `SystemTrayIcon`)
 - Localization: English, Russian, German, Spanish, Simplified Chinese
 - Single-instance guard (abstract unix socket, kernel-released on exit)
+- Optional database encryption: SQLCipher whole-file encryption, keyed by
+  a passphrase you set in Options → Security. Off by default; you can turn
+  it on and off again at any time. The passphrase can be remembered in the
+  system keyring so launches stay silent, and there is no way to recover a
+  forgotten one
 
 ### Degraded modes
 
@@ -95,6 +100,8 @@ The app starts and stays useful when a piece of the desktop is missing:
 | A credential store (Secret Service / Credential Manager) | Only matters with an encrypted database: the passphrase cannot be remembered, so it is prompted at every launch. The *Remember* checkbox is disabled and says why |
 | A correct passphrase on the first try, for an encrypted database | The unlock dialog stays up with a "wrong passphrase" message; cancelling exits cleanly and releases the single-instance guard |
 | A remembered passphrase that no longer works | The stale keyring entry is cleared and the dialog is shown, rather than the app refusing to start |
+| A clean shutdown during an encrypt / change / remove conversion | The original file is untouched — nothing is written to it until the replacement has been verified — and the partial `<name>.sqlite.new` left behind by the crash is deleted automatically at the next launch |
+| A way to recover a forgotten passphrase | None exists. Options → Security says so before you ever set one |
 
 ## Build prerequisites (Linux)
 

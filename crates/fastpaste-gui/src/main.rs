@@ -1590,6 +1590,128 @@ fn repopulate_selection_dialog(d: &SelectionDialog, ctx: &Arc<AppContext>) {
 }
 
 // ---------------------------------------------------------------------------
+// Security (Options page 4: encrypt / change / remove a passphrase)
+// ---------------------------------------------------------------------------
+
+/// Which of the Security page's three operations a set of fields is being
+/// checked for. `Encrypt` has no existing passphrase to prove, so it does
+/// not require `current`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecurityOp {
+    Encrypt,
+    Change,
+    Remove,
+}
+
+/// Outcome of [`validate_security_fields`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecurityValidation {
+    /// A required field was left blank.
+    Empty,
+    /// `new` and `confirm` were both given but disagree.
+    Mismatch,
+    Ok,
+}
+
+/// Check the Security page's passphrase fields before running a
+/// conversion, without touching Slint or the filesystem.
+///
+/// Pulled out as its own function (per `AGENTS.md`'s testing rule)
+/// specifically so these rules are unit-testable headlessly: the brief
+/// this page was built from put the equivalent checks inline in three
+/// Slint callbacks, which no test can construct.
+fn validate_security_fields(
+    op: SecurityOp,
+    current: &str,
+    new: &str,
+    confirm: &str,
+) -> SecurityValidation {
+    if matches!(op, SecurityOp::Change | SecurityOp::Remove) && current.is_empty() {
+        return SecurityValidation::Empty;
+    }
+    if matches!(op, SecurityOp::Remove) {
+        // Remove has no new/confirm fields to check.
+        return SecurityValidation::Ok;
+    }
+    if new.is_empty() {
+        return SecurityValidation::Empty;
+    }
+    if new != confirm {
+        return SecurityValidation::Mismatch;
+    }
+    SecurityValidation::Ok
+}
+
+/// Run a whole-file conversion on `ctx`'s database.
+///
+/// Drops the live connection first — SQLCipher cannot rewrite a file that
+/// is open — and reopens whatever the conversion produced. The
+/// single-instance guard rules out another process racing us.
+///
+/// Both keys are passed in rather than read back from the credential
+/// store, because after a passphrase change the store still holds the old
+/// one. `key_on_success` opens the file the conversion produced;
+/// `key_on_failure` opens the untouched original. Getting these the wrong
+/// way round leaves the app holding no database at all.
+fn convert_database<F>(
+    ctx: &Arc<AppContext>,
+    op: F,
+    key_on_success: Option<&secrecy::SecretString>,
+    key_on_failure: Option<&secrecy::SecretString>,
+) -> Result<(), fastpaste_data::DataError>
+where
+    F: FnOnce(&std::path::Path) -> Result<(), fastpaste_data::DataError>,
+{
+    let mut guard = ctx.db.lock().unwrap_or_else(|e| e.into_inner());
+    // Replace the live connection with a throwaway in-memory one for the
+    // duration: `*guard` cannot be left uninitialised, and the file must
+    // have no connection open while SQLCipher rewrites it.
+    let placeholder = fastpaste_data::Database::open_in_memory()?;
+    drop(std::mem::replace(&mut *guard, placeholder));
+
+    let result = op(&ctx.db_path);
+
+    // Reopen either way: after a success the new file, after a failure the
+    // untouched original.
+    let key = key_after_conversion(&result, key_on_success, key_on_failure);
+    *guard = fastpaste_data::Database::open_with_key(&ctx.db_path, false, key)?;
+    result
+}
+
+/// Which key reopens the file after a conversion attempt.
+///
+/// This is the one line in `convert_database` a mistake is fatal in: on
+/// success the file now needs `key_on_success` (the new key just written
+/// to it), and on failure it still needs `key_on_failure` (the original
+/// key — the file was never touched). Reading the passphrase back from
+/// the credential store instead would be wrong on *both* branches after a
+/// passphrase change, since the store still holds the old one until the
+/// caller updates it. Pulled out on its own so this selection is
+/// unit-testable on its own: `convert_database` itself needs a real
+/// `AppContext`, which pulls in platform backends (clipboard, hotkeys)
+/// that do not construct headlessly, so it cannot be exercised directly
+/// in CI.
+fn key_after_conversion<'a>(
+    result: &Result<(), fastpaste_data::DataError>,
+    key_on_success: Option<&'a secrecy::SecretString>,
+    key_on_failure: Option<&'a secrecy::SecretString>,
+) -> Option<&'a secrecy::SecretString> {
+    if result.is_ok() {
+        key_on_success
+    } else {
+        key_on_failure
+    }
+}
+
+/// Clear the three passphrase fields after every attempt, successful or
+/// not, so a passphrase never lingers in the dialog once it has been used.
+fn clear_security_fields(d: &OptionsDialog) {
+    d.set_security_current_passphrase("".into());
+    d.set_security_new_passphrase("".into());
+    d.set_security_confirm_passphrase("".into());
+}
+
+// ---------------------------------------------------------------------------
 // Options Dialog
 // ---------------------------------------------------------------------------
 
@@ -1641,6 +1763,154 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
     dialog.set_language_labels(slint::ModelRc::new(slint::VecModel::from(lang_labels)));
 
     seed_options_dialog(&dialog, &ctx.settings());
+
+    // Security page. `db_path` and `secret_store` come off the context;
+    // every conversion needs the database closed, which is why each of
+    // these takes the mutex and replaces the `Database` inside it rather
+    // than working through an open handle.
+    dialog.set_security_encrypted(
+        fastpaste_data::Database::encryption_state(&ctx.db_path)
+            .map(|s| s == EncryptionState::Encrypted)
+            .unwrap_or(false),
+    );
+    dialog.set_security_remember_available(ctx.secret_store.is_available());
+
+    {
+        let ctx = ctx.clone();
+        let weak = dialog.as_weak();
+        dialog.on_security_encrypt_clicked(move || {
+            let Some(d) = weak.upgrade() else { return };
+            let current = d.get_security_current_passphrase().to_string();
+            let new = d.get_security_new_passphrase().to_string();
+            let confirm = d.get_security_confirm_passphrase().to_string();
+            match validate_security_fields(SecurityOp::Encrypt, &current, &new, &confirm) {
+                SecurityValidation::Empty => {
+                    d.set_security_message(i18n().msg("options-security-empty").into());
+                    return;
+                }
+                SecurityValidation::Mismatch => {
+                    d.set_security_message(i18n().msg("options-security-mismatch").into());
+                    return;
+                }
+                SecurityValidation::Ok => {}
+            }
+            let key = secrecy::SecretString::from(new);
+
+            match convert_database(
+                &ctx,
+                |path| fastpaste_data::encrypt_database(path, &key),
+                Some(&key),
+                None,
+            ) {
+                Ok(()) => {
+                    if d.get_security_remember()
+                        && ctx.secret_store.is_available()
+                        && let Err(e) = ctx
+                            .secret_store
+                            .set(fastpaste_app::PASSPHRASE_ACCOUNT, &key)
+                    {
+                        tracing::warn!("could not remember the passphrase: {e}");
+                    }
+                    d.set_security_encrypted(true);
+                    d.set_security_message(i18n().msg("options-security-done-encrypted").into());
+                }
+                Err(e) => d.set_security_message(format!("{e}").into()),
+            }
+            clear_security_fields(&d);
+        });
+    }
+
+    {
+        let ctx = ctx.clone();
+        let weak = dialog.as_weak();
+        dialog.on_security_change_clicked(move || {
+            let Some(d) = weak.upgrade() else { return };
+            let current = d.get_security_current_passphrase().to_string();
+            let new = d.get_security_new_passphrase().to_string();
+            let confirm = d.get_security_confirm_passphrase().to_string();
+            match validate_security_fields(SecurityOp::Change, &current, &new, &confirm) {
+                SecurityValidation::Empty => {
+                    d.set_security_message(i18n().msg("options-security-empty").into());
+                    return;
+                }
+                SecurityValidation::Mismatch => {
+                    d.set_security_message(i18n().msg("options-security-mismatch").into());
+                    return;
+                }
+                SecurityValidation::Ok => {}
+            }
+            let current = secrecy::SecretString::from(current);
+            let new = secrecy::SecretString::from(new);
+
+            // `PRAGMA rekey` works in place, but it still needs the live
+            // connection closed, so it goes through the same helper.
+            match convert_database(
+                &ctx,
+                |path| fastpaste_data::change_passphrase(path, &current, &new),
+                Some(&new),
+                Some(&current),
+            ) {
+                Ok(()) => {
+                    // Only touch the stored entry if there already was
+                    // one: a user who never asked to be remembered must
+                    // not silently acquire a keyring entry here.
+                    if ctx.secret_store.is_available()
+                        && ctx
+                            .secret_store
+                            .get(fastpaste_app::PASSPHRASE_ACCOUNT)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                        && let Err(e) = ctx
+                            .secret_store
+                            .set(fastpaste_app::PASSPHRASE_ACCOUNT, &new)
+                    {
+                        tracing::warn!("could not update the remembered passphrase: {e}");
+                    }
+                    d.set_security_message(i18n().msg("options-security-done-changed").into());
+                }
+                Err(e) => d.set_security_message(format!("{e}").into()),
+            }
+            clear_security_fields(&d);
+        });
+    }
+
+    {
+        let ctx = ctx.clone();
+        let weak = dialog.as_weak();
+        dialog.on_security_remove_clicked(move || {
+            let Some(d) = weak.upgrade() else { return };
+            let current = d.get_security_current_passphrase().to_string();
+            match validate_security_fields(SecurityOp::Remove, &current, "", "") {
+                SecurityValidation::Empty => {
+                    d.set_security_message(i18n().msg("options-security-empty").into());
+                    return;
+                }
+                SecurityValidation::Mismatch => unreachable!("Remove never checks new/confirm"),
+                SecurityValidation::Ok => {}
+            }
+            let current = secrecy::SecretString::from(current);
+
+            match convert_database(
+                &ctx,
+                |path| fastpaste_data::decrypt_database(path, &current),
+                None,
+                Some(&current),
+            ) {
+                Ok(()) => {
+                    // The entry now unlocks nothing. Leaving it would sit
+                    // a live passphrase in the keyring for no reason.
+                    if let Err(e) = ctx.secret_store.delete(fastpaste_app::PASSPHRASE_ACCOUNT) {
+                        tracing::warn!("could not clear the remembered passphrase: {e}");
+                    }
+                    d.set_security_encrypted(false);
+                    d.set_security_message(i18n().msg("options-security-done-removed").into());
+                }
+                Err(e) => d.set_security_message(format!("{e}").into()),
+            }
+            clear_security_fields(&d);
+        });
+    }
 
     // OK → apply + hide.
     let ctx_ok = ctx.clone();
@@ -2003,6 +2273,22 @@ where
     t.set_options_ok(m("options-ok").into());
     t.set_options_cancel(m("options-cancel").into());
     t.set_options_apply(m("options-apply").into());
+
+    t.set_options_security(m("options-security").into());
+    t.set_options_security_state_plaintext(m("options-security-state-plaintext").into());
+    t.set_options_security_state_encrypted(m("options-security-state-encrypted").into());
+    t.set_options_security_current_label(m("options-security-current-label").into());
+    t.set_options_security_new_label(m("options-security-new-label").into());
+    t.set_options_security_confirm_label(m("options-security-confirm-label").into());
+    t.set_options_security_encrypt(m("options-security-encrypt").into());
+    t.set_options_security_change(m("options-security-change").into());
+    t.set_options_security_remove(m("options-security-remove").into());
+    t.set_options_security_warning(m("options-security-warning").into());
+    t.set_options_security_mismatch(m("options-security-mismatch").into());
+    t.set_options_security_empty(m("options-security-empty").into());
+    t.set_options_security_done_encrypted(m("options-security-done-encrypted").into());
+    t.set_options_security_done_changed(m("options-security-done-changed").into());
+    t.set_options_security_done_removed(m("options-security-done-removed").into());
 
     t.set_confirm_delete_title(m("confirm-delete-title").into());
     t.set_confirm_yes(m("confirm-yes").into());
@@ -2380,5 +2666,129 @@ mod tests {
             }
         }
         out
+    }
+
+    // ---- validate_security_fields ----------------------------------------
+
+    #[test]
+    fn encrypt_requires_a_nonempty_new_passphrase() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Encrypt, "", "", ""),
+            SecurityValidation::Empty
+        );
+    }
+
+    #[test]
+    fn encrypt_requires_new_and_confirm_to_match() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Encrypt, "", "abc", "xyz"),
+            SecurityValidation::Mismatch
+        );
+    }
+
+    #[test]
+    fn encrypt_passes_when_new_and_confirm_match() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Encrypt, "", "abc", "abc"),
+            SecurityValidation::Ok
+        );
+    }
+
+    #[test]
+    fn change_requires_a_current_passphrase() {
+        // Current is missing even though new/confirm agree — Change (unlike
+        // Encrypt) has to prove the caller already knows the passphrase.
+        assert_eq!(
+            validate_security_fields(SecurityOp::Change, "", "abc", "abc"),
+            SecurityValidation::Empty
+        );
+    }
+
+    #[test]
+    fn change_requires_a_nonempty_new_passphrase() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Change, "cur", "", ""),
+            SecurityValidation::Empty
+        );
+    }
+
+    #[test]
+    fn change_requires_new_and_confirm_to_match() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Change, "cur", "abc", "xyz"),
+            SecurityValidation::Mismatch
+        );
+    }
+
+    #[test]
+    fn change_passes_when_every_field_is_consistent() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Change, "cur", "new", "new"),
+            SecurityValidation::Ok
+        );
+    }
+
+    #[test]
+    fn remove_requires_a_current_passphrase() {
+        assert_eq!(
+            validate_security_fields(SecurityOp::Remove, "", "", ""),
+            SecurityValidation::Empty
+        );
+    }
+
+    #[test]
+    fn remove_passes_with_only_a_current_passphrase() {
+        // New/confirm are irrelevant to Remove — the page never shows
+        // those fields for this operation.
+        assert_eq!(
+            validate_security_fields(SecurityOp::Remove, "cur", "", ""),
+            SecurityValidation::Ok
+        );
+    }
+
+    // ---- key_after_conversion --------------------------------------------
+    //
+    // This is the "correctness trap": a conversion's success key opens the
+    // file it just produced, and its failure key opens the untouched
+    // original, which after a passphrase change are two DIFFERENT keys.
+    // Swapping them leaves the app holding no usable database.
+
+    use secrecy::{ExposeSecret, SecretString};
+
+    #[test]
+    fn a_successful_conversion_reopens_with_the_success_key() {
+        let success = SecretString::from("new-key");
+        let failure = SecretString::from("old-key");
+        let key = key_after_conversion(&Ok(()), Some(&success), Some(&failure));
+        assert_eq!(key.unwrap().expose_secret(), "new-key");
+    }
+
+    #[test]
+    fn a_failed_conversion_reopens_with_the_failure_key() {
+        let success = SecretString::from("new-key");
+        let failure = SecretString::from("old-key");
+        let err = Err(fastpaste_data::DataError::WrongPassphrase);
+        let key = key_after_conversion(&err, Some(&success), Some(&failure));
+        assert_eq!(key.unwrap().expose_secret(), "old-key");
+    }
+
+    /// Encrypt's shape: nothing to open with before success (the file was
+    /// plaintext), nothing to open with after failure either (still
+    /// plaintext — `Database::open_with_key` with `None` opens it).
+    #[test]
+    fn encrypt_has_no_failure_key() {
+        let success = SecretString::from("new-key");
+        let err = Err(fastpaste_data::DataError::WrongPassphrase);
+        assert!(key_after_conversion(&Ok(()), Some(&success), None).is_some());
+        assert!(key_after_conversion(&err, Some(&success), None).is_none());
+    }
+
+    /// Remove's shape: the reverse of Encrypt.
+    #[test]
+    fn remove_has_no_success_key() {
+        let current = SecretString::from("current-key");
+        let err = Err(fastpaste_data::DataError::WrongPassphrase);
+        assert!(key_after_conversion(&Ok(()), None, Some(&current)).is_none());
+        assert!(key_after_conversion(&err, None, Some(&current)).is_some());
     }
 }

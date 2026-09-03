@@ -84,4 +84,23 @@ export global Translations {
     in-out property <string> unlock-error-wrong: "Wrong passphrase.";
     in-out property <string> unlock-unlock: "Unlock";
     in-out property <string> unlock-cancel: "Cancel";
+
+    // Security options page (encrypt / change / remove a passphrase).
+    // The remember-checkbox caption reuses unlock-remember /
+    // unlock-remember-unavailable above rather than duplicating them.
+    in-out property <string> options-security: "Security";
+    in-out property <string> options-security-state-plaintext: "This database is not encrypted. Anyone who can read the file can read your snippets.";
+    in-out property <string> options-security-state-encrypted: "This database is encrypted.";
+    in-out property <string> options-security-current-label: "Current passphrase:";
+    in-out property <string> options-security-new-label: "New passphrase:";
+    in-out property <string> options-security-confirm-label: "Confirm:";
+    in-out property <string> options-security-encrypt: "Encrypt database";
+    in-out property <string> options-security-change: "Change passphrase";
+    in-out property <string> options-security-remove: "Remove encryption";
+    in-out property <string> options-security-warning: "There is no way to recover a forgotten passphrase. Encrypting protects the file from this point on: the unencrypted copy is deleted, but on an SSD or a journalling filesystem its contents may still be recoverable from the raw device.";
+    in-out property <string> options-security-mismatch: "The two passphrases do not match.";
+    in-out property <string> options-security-empty: "Enter a passphrase.";
+    in-out property <string> options-security-done-encrypted: "The database is now encrypted.";
+    in-out property <string> options-security-done-changed: "Passphrase changed.";
+    in-out property <string> options-security-done-removed: "Encryption removed.";
 }

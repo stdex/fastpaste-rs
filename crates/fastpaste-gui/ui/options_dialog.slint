@@ -111,6 +111,24 @@ export component OptionsDialog inherits Window {
     in-out property <int> paste-delay-ms: 70;
     in-out property <bool> paste-restore-clipboard: true;
 
+    // -- Security ------------------------------------------------------------
+    // `security-encrypted` picks which of the two field groups is shown
+    // (set a passphrase and encrypt, vs. change/remove an existing one).
+    // The three passphrase fields are shared between both groups and
+    // cleared by the controller after every attempt, successful or not,
+    // so a passphrase never lingers in the dialog once it has been used.
+    in property <bool> security-encrypted;
+    in-out property <string> security-current-passphrase;
+    in-out property <string> security-new-passphrase;
+    in-out property <string> security-confirm-passphrase;
+    in-out property <bool> security-remember;
+    in property <bool> security-remember-available;
+    in-out property <string> security-message;
+
+    callback security-encrypt-clicked();
+    callback security-change-clicked();
+    callback security-remove-clicked();
+
     // -- Navigation -----------------------------------------------------------
     in-out property <int> active-page: 0;
 
@@ -141,6 +159,7 @@ export component OptionsDialog inherits Window {
                     Translations.options-hotkeys,
                     Translations.options-clipboard-history,
                     Translations.options-paste,
+                    Translations.options-security,
                 ];
                 current-index <=> root.active-page;
             }
@@ -309,6 +328,128 @@ export component OptionsDialog inherits Window {
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                             }
+                        }
+                    }
+
+                    // -- Security (page 4) --
+                    if root.active-page == 4: VerticalLayout {
+                        spacing: Theme.spacing;
+                        alignment: start;
+
+                        FPageTitle { text: Translations.options-security; }
+
+                        Text {
+                            text: root.security-encrypted
+                                ? Translations.options-security-state-encrypted
+                                : Translations.options-security-state-plaintext;
+                            wrap: word-wrap;
+                            font-size: Theme.font-size;
+                            color: Theme.text;
+                        }
+
+                        // Plaintext: set a passphrase and convert.
+                        if !root.security-encrypted: VerticalLayout {
+                            spacing: Theme.row-spacing;
+
+                            GridLayout {
+                                spacing-horizontal: Theme.spacing;
+                                spacing-vertical: Theme.row-spacing;
+
+                                Row {
+                                    FLabel { text: Translations.options-security-new-label; }
+                                    FLineEdit {
+                                        input-type: password;
+                                        text <=> root.security-new-passphrase;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Row {
+                                    FLabel { text: Translations.options-security-confirm-label; }
+                                    FLineEdit {
+                                        input-type: password;
+                                        text <=> root.security-confirm-passphrase;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+
+                            FCheckBox {
+                                text: root.security-remember-available
+                                    ? Translations.unlock-remember
+                                    : Translations.unlock-remember-unavailable;
+                                enabled: root.security-remember-available;
+                                checked <=> root.security-remember;
+                            }
+
+                            FHint {
+                                text: Translations.options-security-warning;
+                            }
+
+                            HorizontalLayout {
+                                spacing: Theme.spacing;
+                                FButton {
+                                    text: Translations.options-security-encrypt;
+                                    primary: true;
+                                    clicked => { root.security-encrypt-clicked(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+
+                        // Encrypted: change or remove, both needing the
+                        // current passphrase.
+                        if root.security-encrypted: VerticalLayout {
+                            spacing: Theme.row-spacing;
+
+                            GridLayout {
+                                spacing-horizontal: Theme.spacing;
+                                spacing-vertical: Theme.row-spacing;
+
+                                Row {
+                                    FLabel { text: Translations.options-security-current-label; }
+                                    FLineEdit {
+                                        input-type: password;
+                                        text <=> root.security-current-passphrase;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Row {
+                                    FLabel { text: Translations.options-security-new-label; }
+                                    FLineEdit {
+                                        input-type: password;
+                                        text <=> root.security-new-passphrase;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                                Row {
+                                    FLabel { text: Translations.options-security-confirm-label; }
+                                    FLineEdit {
+                                        input-type: password;
+                                        text <=> root.security-confirm-passphrase;
+                                    }
+                                    Rectangle { horizontal-stretch: 1; }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: Theme.spacing;
+                                FButton {
+                                    text: Translations.options-security-change;
+                                    clicked => { root.security-change-clicked(); }
+                                }
+                                FButton {
+                                    text: Translations.options-security-remove;
+                                    clicked => { root.security-remove-clicked(); }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                        }
+
+                        if root.security-message != "": Text {
+                            text: root.security-message;
+                            wrap: word-wrap;
+                            font-size: Theme.font-size;
+                            color: Theme.text;
                         }
                     }
                 }
