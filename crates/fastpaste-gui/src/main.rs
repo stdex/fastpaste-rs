@@ -340,12 +340,22 @@ fn unlock_then_start(
     // would still run and call `quit_event_loop()`, tearing down the app
     // it just started.
     let unlocked = Rc::new(std::cell::Cell::new(false));
+    // Set if `start_app` fails after a successful unlock. `main()`'s other
+    // two callers of `start_app` propagate its error with `?`; this path
+    // instead has to end the event loop from inside a callback, and
+    // `run_event_loop_until_quit()` returns a plain `Ok(())` regardless of
+    // *why* it was told to quit — so without this, a startup failure here
+    // would silently exit 0 instead of reporting it like the other two
+    // paths do.
+    let failure: Rc<std::cell::RefCell<Option<anyhow::Error>>> =
+        Rc::new(std::cell::RefCell::new(None));
 
     {
         let probe = probe.clone();
         let store = store.clone();
         let weak = weak.clone();
         let unlocked = unlocked.clone();
+        let failure = failure.clone();
         dialog.on_unlock_clicked(move || {
             let Some(d) = weak.upgrade() else { return };
             let key = secrecy::SecretString::from(d.get_passphrase().to_string());
@@ -373,6 +383,7 @@ fn unlock_then_start(
                     let ctx = Arc::new(ctx);
                     if let Err(e) = start_app(ctx) {
                         tracing::error!("startup failed after unlock: {e}");
+                        *failure.borrow_mut() = Some(e);
                         let _ = slint::quit_event_loop();
                     }
                 }
@@ -395,6 +406,9 @@ fn unlock_then_start(
         }
         tracing::info!("unlock cancelled; exiting");
         if let Some(d) = weak.upgrade() {
+            // Same reasoning as the success path: don't leave the
+            // passphrase sitting in a live SharedString.
+            d.set_passphrase("".into());
             let _ = d.hide();
         }
         let _ = slint::quit_event_loop();
@@ -406,7 +420,16 @@ fn unlock_then_start(
     // the tray up. See the spike recorded in the design doc.
     let result = slint::run_event_loop_until_quit();
     ui_state::release_all();
-    result.map_err(|e| anyhow::anyhow!("Slint event loop exited with error: {e}"))
+    result.map_err(|e| anyhow::anyhow!("Slint event loop exited with error: {e}"))?;
+
+    // A genuine cancel leaves `failure` empty and this returns `Ok(())`;
+    // a `start_app` failure after a successful unlock is what set it, and
+    // must surface here the same way the other two `start_app` call sites
+    // (which use `?` directly) already do.
+    match failure.borrow_mut().take() {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Run the event loop for an already-started app, then flush and tear
