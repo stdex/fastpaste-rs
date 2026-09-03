@@ -264,6 +264,7 @@ mod tests {
     /// A stuck Ctrl is the nastiest failure this module can produce, so
     /// pin the exact transition order: every press is matched by a
     /// release, and Ctrl brackets V.
+    #[cfg(target_os = "linux")]
     #[test]
     fn ctrl_v_frames_press_and_release_in_order() {
         let frames = ctrl_v_frames();
@@ -283,6 +284,7 @@ mod tests {
         assert!(pos((KeyCode::KEY_V, false)) < pos((KeyCode::KEY_LEFTCTRL, false)));
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn every_pressed_key_is_released() {
         let frames = ctrl_v_frames();
@@ -295,6 +297,7 @@ mod tests {
 
     /// The device only declares the keys it emits; a frame naming a key
     /// outside that set would be silently dropped by the kernel.
+    #[cfg(target_os = "linux")]
     #[test]
     fn frames_only_use_declared_keys() {
         for (key, _) in ctrl_v_frames() {
