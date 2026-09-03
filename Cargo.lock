@@ -1551,6 +1551,7 @@ dependencies = [
  "slint-build",
  "slint-tree-view",
  "sys-locale",
+ "tempfile",
  "tracing",
  "tracing-subscriber",
 ]

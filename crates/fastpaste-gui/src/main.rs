@@ -1642,17 +1642,72 @@ fn validate_security_fields(
     SecurityValidation::Ok
 }
 
+/// Confirm `current` actually opens the database at `path`, read-only and
+/// without requiring exclusive access.
+///
+/// Called before `convert_database` for Change and Remove, specifically
+/// so a mistyped current passphrase — the single most likely mistake on
+/// this page — is caught and reported *before* the live connection is
+/// ever touched. Without this check, `convert_database` swaps in its
+/// in-memory placeholder, the conversion below fails immediately on that
+/// same wrong key, and the reopen at the end fails on that same wrong key
+/// too — stranding the app on the placeholder for the rest of the
+/// session (existing snippets appear to vanish, anything added afterwards
+/// is silently lost), with a message indistinguishable from an ordinary
+/// failed conversion. Read-only + no exclusive access means this check
+/// itself can never be *why* a legitimate conversion then fails.
+fn verify_current_passphrase(
+    path: &std::path::Path,
+    current: &secrecy::SecretString,
+) -> Result<(), fastpaste_data::DataError> {
+    fastpaste_data::Database::open_with_key(path, true, Some(current)).map(|_| ())
+}
+
+/// Which key reopens the file after a conversion attempt, and the reopen
+/// itself.
+///
+/// This is the step in `convert_database` a mistake is fatal in: on
+/// success the file now needs `key_on_success` (the new key just written
+/// to it), and on failure it still needs `key_on_failure` (the original
+/// key — the file was never touched). Reading the passphrase back from
+/// the credential store instead would be wrong on *both* branches after a
+/// passphrase change, since the store still holds the old one until the
+/// caller updates it.
+///
+/// Pulled out on its own — unlike `convert_database`, which needs a real
+/// `AppContext` and so cannot be exercised headlessly — this needs only a
+/// path and two keys, so it is unit-tested directly against a real
+/// SQLCipher-encrypted temp file, including the exact wrong-passphrase
+/// shape that caused the strand described on `verify_current_passphrase`.
+fn reopen_after_conversion(
+    path: &std::path::Path,
+    result: &Result<(), fastpaste_data::DataError>,
+    key_on_success: Option<&secrecy::SecretString>,
+    key_on_failure: Option<&secrecy::SecretString>,
+) -> Result<fastpaste_data::Database, fastpaste_data::DataError> {
+    let key = if result.is_ok() {
+        key_on_success
+    } else {
+        key_on_failure
+    };
+    fastpaste_data::Database::open_with_key(path, false, key)
+}
+
 /// Run a whole-file conversion on `ctx`'s database.
 ///
 /// Drops the live connection first — SQLCipher cannot rewrite a file that
-/// is open — and reopens whatever the conversion produced. The
-/// single-instance guard rules out another process racing us.
+/// is open — and reopens whatever the conversion produced via
+/// [`reopen_after_conversion`]. The single-instance guard rules out
+/// another process racing us.
 ///
-/// Both keys are passed in rather than read back from the credential
-/// store, because after a passphrase change the store still holds the old
-/// one. `key_on_success` opens the file the conversion produced;
-/// `key_on_failure` opens the untouched original. Getting these the wrong
-/// way round leaves the app holding no database at all.
+/// By the time this runs, callers of Change and Remove have already
+/// called [`verify_current_passphrase`], so `key_on_failure` is known to
+/// be correct and the reopen below should always succeed (the original
+/// file is untouched on failure — Task 5's invariant). If it still fails
+/// for some other reason (the file vanished mid-operation, a disk fault),
+/// that is loud rather than silent: it is logged, and the mutex is left
+/// holding the in-memory placeholder from below until the app is
+/// restarted, since there is nothing else valid to put there.
 fn convert_database<F>(
     ctx: &Arc<AppContext>,
     op: F,
@@ -1671,40 +1726,42 @@ where
 
     let result = op(&ctx.db_path);
 
-    // Reopen either way: after a success the new file, after a failure the
-    // untouched original.
-    let key = key_after_conversion(&result, key_on_success, key_on_failure);
-    *guard = fastpaste_data::Database::open_with_key(&ctx.db_path, false, key)?;
-    result
-}
-
-/// Which key reopens the file after a conversion attempt.
-///
-/// This is the one line in `convert_database` a mistake is fatal in: on
-/// success the file now needs `key_on_success` (the new key just written
-/// to it), and on failure it still needs `key_on_failure` (the original
-/// key — the file was never touched). Reading the passphrase back from
-/// the credential store instead would be wrong on *both* branches after a
-/// passphrase change, since the store still holds the old one until the
-/// caller updates it. Pulled out on its own so this selection is
-/// unit-testable on its own: `convert_database` itself needs a real
-/// `AppContext`, which pulls in platform backends (clipboard, hotkeys)
-/// that do not construct headlessly, so it cannot be exercised directly
-/// in CI.
-fn key_after_conversion<'a>(
-    result: &Result<(), fastpaste_data::DataError>,
-    key_on_success: Option<&'a secrecy::SecretString>,
-    key_on_failure: Option<&'a secrecy::SecretString>,
-) -> Option<&'a secrecy::SecretString> {
-    if result.is_ok() {
-        key_on_success
-    } else {
-        key_on_failure
+    match reopen_after_conversion(&ctx.db_path, &result, key_on_success, key_on_failure) {
+        Ok(db) => {
+            *guard = db;
+            result
+        }
+        Err(reopen_err) => {
+            tracing::error!(
+                "could not reopen the database after a conversion attempt \
+                 ({reopen_err}); running on an in-memory placeholder until \
+                 the app is restarted"
+            );
+            Err(reopen_err)
+        }
     }
 }
 
-/// Clear the three passphrase fields after every attempt, successful or
-/// not, so a passphrase never lingers in the dialog once it has been used.
+/// Map a conversion failure to text for the Security page's message line.
+///
+/// `WrongPassphrase` is localized the same way the unlock dialog handles
+/// the identical failure (`unlock-error-wrong`), rather than showing the
+/// error's raw English `Display` text on an otherwise fully localized
+/// page. Every other variant is genuinely unexpected here (a corrupt
+/// schema, an I/O fault, a lost-rows conversion mismatch…) and none of
+/// the five locale files describe it, so it falls back to the error's own
+/// message rather than inventing a translation for a case that should not
+/// happen.
+fn security_error_message(e: &fastpaste_data::DataError) -> String {
+    match e {
+        fastpaste_data::DataError::WrongPassphrase => i18n().msg("unlock-error-wrong"),
+        other => format!("{other}"),
+    }
+}
+
+/// Clear the three passphrase fields after every attempt, successful,
+/// rejected by validation, or failed, so a passphrase never lingers in
+/// the dialog once it has been used.
 fn clear_security_fields(d: &OptionsDialog) {
     d.set_security_current_passphrase("".into());
     d.set_security_new_passphrase("".into());
@@ -1780,16 +1837,20 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
         let weak = dialog.as_weak();
         dialog.on_security_encrypt_clicked(move || {
             let Some(d) = weak.upgrade() else { return };
-            let current = d.get_security_current_passphrase().to_string();
+            // Encrypt has no existing passphrase to prove, so the current-
+            // passphrase field (shown only on the encrypted-state half of
+            // this page) is never read here.
             let new = d.get_security_new_passphrase().to_string();
             let confirm = d.get_security_confirm_passphrase().to_string();
-            match validate_security_fields(SecurityOp::Encrypt, &current, &new, &confirm) {
+            match validate_security_fields(SecurityOp::Encrypt, "", &new, &confirm) {
                 SecurityValidation::Empty => {
                     d.set_security_message(i18n().msg("options-security-empty").into());
+                    clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Mismatch => {
                     d.set_security_message(i18n().msg("options-security-mismatch").into());
+                    clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Ok => {}
@@ -1814,7 +1875,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
                     d.set_security_encrypted(true);
                     d.set_security_message(i18n().msg("options-security-done-encrypted").into());
                 }
-                Err(e) => d.set_security_message(format!("{e}").into()),
+                Err(e) => d.set_security_message(security_error_message(&e).into()),
             }
             clear_security_fields(&d);
         });
@@ -1831,16 +1892,27 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             match validate_security_fields(SecurityOp::Change, &current, &new, &confirm) {
                 SecurityValidation::Empty => {
                     d.set_security_message(i18n().msg("options-security-empty").into());
+                    clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Mismatch => {
                     d.set_security_message(i18n().msg("options-security-mismatch").into());
+                    clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Ok => {}
             }
             let current = secrecy::SecretString::from(current);
             let new = secrecy::SecretString::from(new);
+
+            // Prove the current passphrase actually opens the file BEFORE
+            // touching the live connection. See verify_current_passphrase's
+            // doc for the strand this prevents.
+            if let Err(e) = verify_current_passphrase(&ctx.db_path, &current) {
+                d.set_security_message(security_error_message(&e).into());
+                clear_security_fields(&d);
+                return;
+            }
 
             // `PRAGMA rekey` works in place, but it still needs the live
             // connection closed, so it goes through the same helper.
@@ -1869,7 +1941,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
                     }
                     d.set_security_message(i18n().msg("options-security-done-changed").into());
                 }
-                Err(e) => d.set_security_message(format!("{e}").into()),
+                Err(e) => d.set_security_message(security_error_message(&e).into()),
             }
             clear_security_fields(&d);
         });
@@ -1884,12 +1956,22 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
             match validate_security_fields(SecurityOp::Remove, &current, "", "") {
                 SecurityValidation::Empty => {
                     d.set_security_message(i18n().msg("options-security-empty").into());
+                    clear_security_fields(&d);
                     return;
                 }
                 SecurityValidation::Mismatch => unreachable!("Remove never checks new/confirm"),
                 SecurityValidation::Ok => {}
             }
             let current = secrecy::SecretString::from(current);
+
+            // Prove the current passphrase actually opens the file BEFORE
+            // touching the live connection. See verify_current_passphrase's
+            // doc for the strand this prevents.
+            if let Err(e) = verify_current_passphrase(&ctx.db_path, &current) {
+                d.set_security_message(security_error_message(&e).into());
+                clear_security_fields(&d);
+                return;
+            }
 
             match convert_database(
                 &ctx,
@@ -1906,7 +1988,7 @@ fn show_options_dialog(ctx: Arc<AppContext>) {
                     d.set_security_encrypted(false);
                     d.set_security_message(i18n().msg("options-security-done-removed").into());
                 }
-                Err(e) => d.set_security_message(format!("{e}").into()),
+                Err(e) => d.set_security_message(security_error_message(&e).into()),
             }
             clear_security_fields(&d);
         });
@@ -2746,49 +2828,137 @@ mod tests {
         );
     }
 
-    // ---- key_after_conversion --------------------------------------------
+    // ---- reopen_after_conversion / verify_current_passphrase -------------
     //
-    // This is the "correctness trap": a conversion's success key opens the
-    // file it just produced, and its failure key opens the untouched
-    // original, which after a passphrase change are two DIFFERENT keys.
-    // Swapping them leaves the app holding no usable database.
+    // This is the "correctness trap" a real fix round caught: a
+    // conversion's success key opens the file it just produced, and its
+    // failure key opens the untouched original, which after a passphrase
+    // change are two DIFFERENT keys. The original version of this code
+    // selected the right key in isolation but never proved the REOPEN
+    // itself would succeed — so a mistyped current passphrase on Change
+    // or Remove failed the conversion eagerly, then failed the reopen on
+    // that same wrong key, stranding the live app on convert_database's
+    // in-memory placeholder for the rest of the session. These tests use
+    // a real SQLCipher-encrypted temp file (not a mock) so they exercise
+    // the actual crypto, the same way fastpaste-data's own tests do.
 
-    use secrecy::{ExposeSecret, SecretString};
+    use secrecy::SecretString;
+    use tempfile::TempDir;
 
-    #[test]
-    fn a_successful_conversion_reopens_with_the_success_key() {
-        let success = SecretString::from("new-key");
-        let failure = SecretString::from("old-key");
-        let key = key_after_conversion(&Ok(()), Some(&success), Some(&failure));
-        assert_eq!(key.unwrap().expose_secret(), "new-key");
+    /// A temp file containing one item, encrypted with `key`.
+    fn encrypted_fixture(key: &SecretString) -> (TempDir, std::path::PathBuf) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("security.sqlite");
+        {
+            let db = fastpaste_data::Database::open(&path, false).unwrap();
+            let mut item = fastpaste_data::Item::new_plain(0, "t", "body");
+            db.insert(&mut item).unwrap();
+        }
+        fastpaste_data::encrypt_database(&path, key).unwrap();
+        (dir, path)
+    }
+
+    fn load_one_body(db: &fastpaste_data::Database) -> String {
+        let items = db.load_all().unwrap();
+        assert_eq!(items.len(), 1, "fixture should carry exactly one item");
+        items[0].body_plain.clone()
     }
 
     #[test]
-    fn a_failed_conversion_reopens_with_the_failure_key() {
-        let success = SecretString::from("new-key");
-        let failure = SecretString::from("old-key");
-        let err = Err(fastpaste_data::DataError::WrongPassphrase);
-        let key = key_after_conversion(&err, Some(&success), Some(&failure));
-        assert_eq!(key.unwrap().expose_secret(), "old-key");
+    fn reopen_after_conversion_on_success_opens_with_the_new_key() {
+        let old = SecretString::from("old-key".to_string());
+        let new = SecretString::from("new-key".to_string());
+        let (_dir, path) = encrypted_fixture(&old);
+        // Simulate a successful change: rekey the file for real, then
+        // reopen exactly as convert_database would.
+        fastpaste_data::change_passphrase(&path, &old, &new).unwrap();
+
+        let db = reopen_after_conversion(&path, &Ok(()), Some(&new), Some(&old)).unwrap();
+        assert_eq!(load_one_body(&db), "body");
     }
 
-    /// Encrypt's shape: nothing to open with before success (the file was
-    /// plaintext), nothing to open with after failure either (still
-    /// plaintext — `Database::open_with_key` with `None` opens it).
+    /// The fixed behaviour once `verify_current_passphrase` has vouched
+    /// for the key: a failed conversion (the file was never touched)
+    /// reopens fine on that same, genuinely correct, failure key — the
+    /// caller is never left without a usable database.
     #[test]
-    fn encrypt_has_no_failure_key() {
-        let success = SecretString::from("new-key");
-        let err = Err(fastpaste_data::DataError::WrongPassphrase);
-        assert!(key_after_conversion(&Ok(()), Some(&success), None).is_some());
-        assert!(key_after_conversion(&err, Some(&success), None).is_none());
+    fn reopen_after_conversion_on_failure_with_the_correct_key_stays_usable() {
+        let current = SecretString::from("current-key".to_string());
+        let new = SecretString::from("new-key".to_string());
+        let (_dir, path) = encrypted_fixture(&current);
+        let failed: Result<(), fastpaste_data::DataError> =
+            Err(fastpaste_data::DataError::ConversionMismatch {
+                expected: 1,
+                got: 0,
+            });
+
+        let db = reopen_after_conversion(&path, &failed, Some(&new), Some(&current)).unwrap();
+        assert_eq!(load_one_body(&db), "body");
     }
 
-    /// Remove's shape: the reverse of Encrypt.
+    /// The scenario the bug lived in: if `key_on_failure` is ever actually
+    /// wrong (which pre-validation is supposed to prevent from reaching
+    /// this function at all), the reopen must surface that loudly — by
+    /// returning `Err` — rather than silently succeeding against the
+    /// wrong key or fabricating a fresh empty database at the same path.
     #[test]
-    fn remove_has_no_success_key() {
-        let current = SecretString::from("current-key");
-        let err = Err(fastpaste_data::DataError::WrongPassphrase);
-        assert!(key_after_conversion(&Ok(()), None, Some(&current)).is_none());
-        assert!(key_after_conversion(&err, None, Some(&current)).is_some());
+    fn reopen_after_conversion_never_silently_succeeds_on_a_wrong_key() {
+        let current = SecretString::from("current-key".to_string());
+        let wrong = SecretString::from("not-the-key".to_string());
+        let (_dir, path) = encrypted_fixture(&current);
+        let failed: Result<(), fastpaste_data::DataError> =
+            Err(fastpaste_data::DataError::WrongPassphrase);
+
+        let err = reopen_after_conversion(&path, &failed, None, Some(&wrong)).unwrap_err();
+        assert!(matches!(err, fastpaste_data::DataError::WrongPassphrase));
+    }
+
+    #[test]
+    fn verify_current_passphrase_accepts_the_right_one() {
+        let current = SecretString::from("current-key".to_string());
+        let (_dir, path) = encrypted_fixture(&current);
+        verify_current_passphrase(&path, &current).unwrap();
+    }
+
+    /// The core safety property `verify_current_passphrase` buys: it is
+    /// read-only and takes no exclusive access, so rejecting a wrong
+    /// passphrase here touches nothing — the real database, opened
+    /// separately with the correct key, is completely unaffected.
+    #[test]
+    fn verify_current_passphrase_rejects_a_wrong_one_without_side_effects() {
+        let current = SecretString::from("current-key".to_string());
+        let wrong = SecretString::from("not-the-key".to_string());
+        let (_dir, path) = encrypted_fixture(&current);
+
+        let err = verify_current_passphrase(&path, &wrong).unwrap_err();
+        assert!(matches!(err, fastpaste_data::DataError::WrongPassphrase));
+
+        // The failed probe above must not have disturbed anything: the
+        // real key still opens the same, still-intact file.
+        let db = fastpaste_data::Database::open_with_key(&path, false, Some(&current)).unwrap();
+        assert_eq!(load_one_body(&db), "body");
+    }
+
+    // ---- security_error_message --------------------------------------
+
+    #[test]
+    fn wrong_passphrase_is_localized_like_the_unlock_dialog() {
+        assert_eq!(
+            security_error_message(&fastpaste_data::DataError::WrongPassphrase),
+            i18n().msg("unlock-error-wrong")
+        );
+    }
+
+    /// Anything else is unexpected on this page and none of the locale
+    /// files describe it, so it must fall back to the error's own text
+    /// rather than silently swallowing detail a user or a bug report
+    /// would need.
+    #[test]
+    fn an_unexpected_error_falls_back_to_its_own_message() {
+        let e = fastpaste_data::DataError::ConversionMismatch {
+            expected: 3,
+            got: 1,
+        };
+        assert_eq!(security_error_message(&e), format!("{e}"));
     }
 }
