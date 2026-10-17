@@ -40,6 +40,44 @@ pub struct PasteConfig {
     pub method: PasteMethod,
 }
 
+/// What to do with the user's clipboard once the keystroke has (or has
+/// not) gone out.
+#[derive(Debug, PartialEq, Eq)]
+enum AfterPaste {
+    /// Nothing reached the target — no device, or the OS refused the
+    /// keystroke — so the payload stays for the user to paste by hand.
+    LeavePayload,
+    /// Put the snapshot back. `settle`: a keystroke was queued, so wait
+    /// for the target to read the payload first. `guarded`: unless someone
+    /// else wrote the clipboard since the payload went on.
+    Restore { settle: bool, guarded: bool },
+}
+
+/// The restore policy. Every keystroke failure except a refusal restores,
+/// so a failed paste never leaves the payload in place of the user's
+/// clipboard; a failed payload write restores unconditionally, because no
+/// keystroke and no wait means nobody else can have written — and a
+/// write that cleared the clipboard before failing must not read as "the
+/// user copied something new".
+fn after_paste(outcome: &Result<bool, PasteError>, payload_written: bool) -> AfterPaste {
+    match outcome {
+        Ok(false) => AfterPaste::LeavePayload,
+        Err(PasteError::Uinput(e)) if e.is_rejected() => AfterPaste::LeavePayload,
+        _ if !payload_written => AfterPaste::Restore {
+            settle: false,
+            guarded: false,
+        },
+        Ok(true) => AfterPaste::Restore {
+            settle: true,
+            guarded: true,
+        },
+        Err(_) => AfterPaste::Restore {
+            settle: false,
+            guarded: true,
+        },
+    }
+}
+
 pub struct Paster {
     clipboard: Arc<dyn Clipboard>,
     uinput: Arc<dyn PasteKeys>,
@@ -182,59 +220,32 @@ impl Paster {
             Err(e) => Err(PasteError::from(e)),
         };
 
-        // `emitted` is the question the restore hinges on: was a keystroke
-        // actually delivered? If not, the payload has to stay put.
-        match (&outcome, snapshot) {
-            (Ok(false), _) => {
-                tracing::warn!(
-                    "/dev/uinput unavailable; payload left on clipboard, user must Ctrl+V"
-                );
-            }
-            // Refused, not broken: typically an elevated window that UIPI
-            // shields from synthetic input. Nothing was pasted, so like the
-            // no-device path the payload stays for a manual paste.
-            (Err(PasteError::Uinput(e)), _) if e.is_rejected() => {
-                tracing::warn!("{e}; payload left on clipboard, user must paste it by hand");
-            }
-            (_, None) => {}
-            // The payload write itself failed: no keystroke, no wait, so
-            // nobody else can have written since. Put the snapshot back
-            // unconditionally — a write that cleared the clipboard before
-            // failing must not read as "the user copied something new".
-            (_, Some(snap)) if !payload_written => self.restore(&snap),
-            (Ok(true), Some(snap)) => {
-                // The keystroke is only queued: the target reads the
-                // clipboard when it gets round to it, and restoring before
-                // then pastes the user's old clipboard instead of the
-                // snippet.
-                if cfg.restore_delay_ms > 0 {
-                    std::thread::sleep(Duration::from_millis(cfg.restore_delay_ms));
+        match after_paste(&outcome, payload_written) {
+            AfterPaste::LeavePayload => match &outcome {
+                Err(e) => {
+                    tracing::warn!("{e}; payload left on clipboard, user must paste it by hand")
                 }
-                self.restore_unless_replaced(&snap, payload, seq_after_payload);
-            }
-            (Err(_), Some(snap)) => {
-                self.restore_unless_replaced(&snap, payload, seq_after_payload);
+                Ok(_) => tracing::warn!(
+                    "/dev/uinput unavailable; payload left on clipboard, user must Ctrl+V"
+                ),
+            },
+            AfterPaste::Restore { settle, guarded } => {
+                if let Some(snap) = snapshot {
+                    if settle && cfg.restore_delay_ms > 0 {
+                        std::thread::sleep(Duration::from_millis(cfg.restore_delay_ms));
+                    }
+                    if guarded && self.replaced_since_payload(payload, seq_after_payload) {
+                        tracing::info!(
+                            "clipboard changed during the paste; keeping it instead of restoring"
+                        );
+                    } else {
+                        self.restore(&snap);
+                    }
+                }
             }
         }
 
         outcome.map(|_| ())
-    }
-
-    /// Put `snapshot` back, unless the clipboard has stopped holding our
-    /// payload. If the user copied something while the sequence was
-    /// waiting, that copy is newer than the snapshot and overwriting it
-    /// would lose it.
-    fn restore_unless_replaced(
-        &self,
-        snapshot: &ClipboardSnapshot,
-        payload: &str,
-        seq_after_payload: Option<u64>,
-    ) {
-        if self.replaced_since_payload(payload, seq_after_payload) {
-            tracing::info!("clipboard changed during the paste; keeping it instead of restoring");
-            return;
-        }
-        self.restore(snapshot);
     }
 
     /// Whether anyone else has written the clipboard since our payload.
@@ -794,6 +805,58 @@ mod tests {
         paster.set_config(cfg(0, /*restore=*/ true));
         paster.paste_text("b").unwrap();
         assert_eq!(clip.text().unwrap(), "a", "restore is live now");
+    }
+
+    // ---- what happens after the keystroke --------------------------------
+
+    /// The whole restore policy in one table, so a new case is a new row
+    /// rather than a new match arm whose position matters.
+    #[test]
+    fn after_paste_decides_restore_from_the_outcome() {
+        use fastpaste_platform::PasteKeyError;
+        let rejected = || {
+            PasteError::Uinput(PasteKeyError::Rejected {
+                sent: 0,
+                expected: 4,
+            })
+        };
+        let dead = || PasteError::Uinput(PasteKeyError::Poisoned);
+        let write_failed = || PasteError::Clipboard(ClipboardError::Access("lost".into()));
+
+        assert_eq!(
+            after_paste(&Ok(false), true),
+            AfterPaste::LeavePayload,
+            "no device"
+        );
+        assert_eq!(
+            after_paste(&Err(rejected()), true),
+            AfterPaste::LeavePayload,
+            "UIPI"
+        );
+        assert_eq!(
+            after_paste(&Ok(true), true),
+            AfterPaste::Restore {
+                settle: true,
+                guarded: true
+            },
+            "a queued keystroke: wait for the target, then restore unless replaced"
+        );
+        assert_eq!(
+            after_paste(&Err(dead()), true),
+            AfterPaste::Restore {
+                settle: false,
+                guarded: true
+            },
+            "a dead device: nothing queued to wait for"
+        );
+        assert_eq!(
+            after_paste(&Err(write_failed()), false),
+            AfterPaste::Restore {
+                settle: false,
+                guarded: false
+            },
+            "the payload never went on: put the snapshot back unconditionally"
+        );
     }
 
     // ---- settle after the keystroke, and the mid-paste copy guard -------
