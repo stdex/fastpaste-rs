@@ -43,6 +43,16 @@ pub enum PasteKeyError {
     Rejected { sent: u32, expected: u32 },
 }
 
+impl PasteKeyError {
+    /// Whether the OS refused the keystroke, as opposed to the device
+    /// failing. A refusal means the target is there but will not take
+    /// synthetic input, so the caller should leave the payload on the
+    /// clipboard for the user to paste by hand.
+    pub fn is_rejected(&self) -> bool {
+        matches!(self, Self::Rejected { .. })
+    }
+}
+
 /// Which chord pastes. Ctrl+V is what nearly every application takes;
 /// the choice exists for the ones that do not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -261,6 +271,23 @@ impl PasteKeys for NullPasteKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only an OS refusal (UIPI) counts as "rejected": the target exists
+    /// and refused us, so the payload should stay for a manual paste. A
+    /// broken device is a different failure.
+    #[test]
+    fn only_rejected_is_rejected() {
+        assert!(
+            PasteKeyError::Rejected {
+                sent: 1,
+                expected: 4
+            }
+            .is_rejected()
+        );
+        assert!(!PasteKeyError::Poisoned.is_rejected());
+        assert!(!PasteKeyError::Emit(std::io::Error::other("gone")).is_rejected());
+        assert!(!PasteKeyError::Open(std::io::Error::other("no device")).is_rejected());
+    }
 
     #[test]
     fn null_reports_unavailable_and_no_ops() {

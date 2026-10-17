@@ -90,7 +90,8 @@ impl Paster {
     ///  * the restore runs even when the keystroke fails, so a failed
     ///    paste cannot leave the payload sitting in place of whatever the
     ///    user had copied (that loss was unrecoverable);
-    ///  * the restore is skipped when no keystroke was *sent* at all, so
+    ///  * the restore is skipped when no keystroke was *sent* at all, or
+    ///    the OS refused it (an elevated target under UIPI), so
     ///    the documented "/dev/uinput unavailable — press Ctrl+V
     ///    yourself" fallback actually leaves something to paste. With the
     ///    default `restore_clipboard = true` that path used to write the
@@ -158,6 +159,12 @@ impl Paster {
                 tracing::warn!(
                     "/dev/uinput unavailable; payload left on clipboard, user must Ctrl+V"
                 );
+            }
+            // Refused, not broken: typically an elevated window that UIPI
+            // shields from synthetic input. Nothing was pasted, so like the
+            // no-device path the payload stays for a manual paste.
+            (Err(PasteError::Uinput(e)), _) if e.is_rejected() => {
+                tracing::warn!("{e}; payload left on clipboard, user must paste it by hand");
             }
             (_, None) => {}
             // The payload write itself failed: no keystroke, no wait, so
@@ -274,6 +281,7 @@ mod tests {
         count: Mutex<u32>,
         available: bool,
         fail: bool,
+        reject: bool,
     }
     impl CountingUinput {
         fn new(available: bool) -> Self {
@@ -281,13 +289,21 @@ mod tests {
                 count: Mutex::new(0),
                 available,
                 fail: false,
+                reject: false,
             }
         }
         fn failing() -> Self {
             Self {
-                count: Mutex::new(0),
-                available: true,
                 fail: true,
+                ..Self::new(true)
+            }
+        }
+        /// Fails the way `SendInput` does when an elevated window has the
+        /// foreground and UIPI drops the synthetic input.
+        fn rejecting() -> Self {
+            Self {
+                reject: true,
+                ..Self::new(true)
             }
         }
         fn calls(&self) -> u32 {
@@ -302,6 +318,12 @@ mod tests {
             *self.count.lock().unwrap() += 1;
             if self.fail {
                 return Err(fastpaste_platform::PasteKeyError::Poisoned);
+            }
+            if self.reject {
+                return Err(fastpaste_platform::PasteKeyError::Rejected {
+                    sent: 1,
+                    expected: 4,
+                });
             }
             Ok(())
         }
@@ -520,6 +542,33 @@ mod tests {
             clip.text().unwrap(),
             "something precious",
             "the user's clipboard must survive a failed paste"
+        );
+    }
+
+    /// Finding 3. An elevated window (UIPI) refuses the synthetic
+    /// keystroke, so nothing was pasted — and restoring the snapshot then
+    /// left the user nothing to paste by hand either. Treat it like the
+    /// no-device path: the payload stays, and the error is still reported.
+    #[test]
+    fn rejected_keystroke_leaves_payload_like_unavailable() {
+        let clip = Arc::new(NullClipboard::new());
+        let uinput = Arc::new(CountingUinput::rejecting());
+        clip.set_text("orig").unwrap();
+
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
+        let err = paster.paste_text("payload").unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                PasteError::Uinput(fastpaste_platform::PasteKeyError::Rejected { .. })
+            ),
+            "the rejection is still reported: {err:?}"
+        );
+        assert_eq!(
+            clip.text().unwrap(),
+            "payload",
+            "the payload must stay for a manual paste into the elevated window"
         );
     }
 
