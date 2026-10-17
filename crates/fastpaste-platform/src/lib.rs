@@ -26,7 +26,9 @@ pub mod paste_keys;
 pub mod secret_store;
 pub mod take_once;
 
-pub use clipboard::{Clipboard, ClipboardError, ClipboardPayload, NullClipboard};
+pub use clipboard::{
+    Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, ImageSnapshot, NullClipboard,
+};
 pub use foreground::{ForegroundError, ForegroundToken, ForegroundWindow, NullForegroundWindow};
 pub use hotkey::{
     GlobalHotkey, HotkeyError, NullGlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID,

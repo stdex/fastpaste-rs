@@ -11,6 +11,7 @@
 //! restored snapshot) are recorded in `last_seen` but not emitted to the
 //! history consumer.
 
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -41,6 +42,10 @@ pub enum ClipboardError {
 }
 
 impl ClipboardError {
+    fn unrestorable() -> Self {
+        Self::Access("this clipboard backend cannot write that content back".into())
+    }
+
     fn from_arboard(e: arboard::Error) -> Self {
         match e {
             arboard::Error::ContentNotAvailable => Self::Empty,
@@ -58,6 +63,116 @@ pub struct ClipboardPayload {
     /// Empty string when unknown; kept in the trait surface so a future
     /// backend that can introspect the source can fill it in.
     pub source_process: String,
+}
+
+/// Pixels taken off the clipboard: RGBA, row-major, 8 bits per channel —
+/// arboard's own representation, kept in a type of ours so callers do not
+/// depend on the backend crate.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ImageSnapshot {
+    pub width: usize,
+    pub height: usize,
+    pub rgba: Vec<u8>,
+}
+
+impl std::fmt::Debug for ImageSnapshot {
+    /// Dimensions only: a screenshot is megabytes of pixels.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ImageSnapshot({}x{}, {} bytes)",
+            self.width,
+            self.height,
+            self.rgba.len()
+        )
+    }
+}
+
+/// The clipboard's contents, saved so they can be put back after a paste.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardSnapshot {
+    Text(String),
+    Image(ImageSnapshot),
+    /// Files copied in a file manager.
+    Files(Vec<PathBuf>),
+    /// Nothing on the clipboard: nothing to lose, nothing to put back.
+    Empty,
+    /// Something is there that this backend cannot read back faithfully
+    /// (or could not read at all). Overwriting it would lose it for good.
+    Unsupported,
+}
+
+/// What a clipboard is when neither text, an image nor files could be
+/// read from it. `has_other_formats` is whether it offers anything at all,
+/// or `None` where the backend cannot list formats.
+fn unrepresentable(has_other_formats: Option<bool>) -> ClipboardSnapshot {
+    match has_other_formats {
+        Some(true) => ClipboardSnapshot::Unsupported,
+        Some(false) => ClipboardSnapshot::Empty,
+        // Cannot tell. Calling it empty is what happened before snapshots
+        // existed; calling it unsupported would refuse every paste here.
+        None => ClipboardSnapshot::Empty,
+    }
+}
+
+/// Snapshot through arboard: text first (the common case, and the one
+/// history deals in), then an image, then a file list, and only then ask
+/// the backend whether anything else is on offer.
+#[cfg(any(target_os = "linux", windows))]
+fn arboard_snapshot(
+    clip: &mut arboard::Clipboard,
+    has_other_formats: impl FnOnce() -> Option<bool>,
+) -> ClipboardSnapshot {
+    // A real read error means something is there that we failed to save.
+    fn failed(what: &str, e: arboard::Error) -> ClipboardSnapshot {
+        tracing::warn!("could not read the clipboard's {what}: {e}");
+        ClipboardSnapshot::Unsupported
+    }
+
+    match clip.get_text() {
+        Ok(text) => return ClipboardSnapshot::Text(text),
+        Err(arboard::Error::ContentNotAvailable) => {}
+        Err(e) => return failed("text", e),
+    }
+    match clip.get_image() {
+        Ok(image) => {
+            return ClipboardSnapshot::Image(ImageSnapshot {
+                width: image.width,
+                height: image.height,
+                rgba: image.bytes.into_owned(),
+            });
+        }
+        Err(arboard::Error::ContentNotAvailable) => {}
+        Err(e) => return failed("image", e),
+    }
+    match clip.get().file_list() {
+        Ok(files) if !files.is_empty() => return ClipboardSnapshot::Files(files),
+        Ok(_) | Err(arboard::Error::ContentNotAvailable) => {}
+        Err(e) => return failed("file list", e),
+    }
+    unrepresentable(has_other_formats())
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn arboard_restore(
+    clip: &mut arboard::Clipboard,
+    snapshot: &ClipboardSnapshot,
+) -> Result<(), ClipboardError> {
+    let result = match snapshot {
+        ClipboardSnapshot::Text(text) => clip.set_text(text.clone()),
+        ClipboardSnapshot::Image(image) => clip.set_image(arboard::ImageData {
+            width: image.width,
+            height: image.height,
+            bytes: std::borrow::Cow::Borrowed(&image.rgba),
+        }),
+        // arboard's text and image setters empty the clipboard first; its
+        // Windows file-list setter does not, so whatever was there — our
+        // payload, after a paste — would stay alongside the files.
+        ClipboardSnapshot::Files(files) => clip.clear().and_then(|()| clip.set().file_list(files)),
+        ClipboardSnapshot::Empty => Ok(()),
+        ClipboardSnapshot::Unsupported => return Err(ClipboardError::unrestorable()),
+    };
+    result.map_err(ClipboardError::from_arboard)
 }
 
 /// Clipboard read/write plus a `changes()` channel for history.
@@ -99,6 +214,31 @@ pub trait Clipboard: Send + Sync {
     /// Without a sequence the caller has to compare contents instead.
     fn sequence(&self) -> Option<u64> {
         None
+    }
+
+    /// Save whatever is on the clipboard so [`Self::restore`] can put it
+    /// back. The default handles text only; a read failure is
+    /// [`ClipboardSnapshot::Unsupported`], since something unreadable is
+    /// still something the user would lose.
+    fn snapshot(&self) -> ClipboardSnapshot {
+        match self.text() {
+            Ok(text) => ClipboardSnapshot::Text(text),
+            Err(ClipboardError::Empty) => ClipboardSnapshot::Empty,
+            Err(e) => {
+                tracing::warn!("could not read the clipboard: {e}");
+                ClipboardSnapshot::Unsupported
+            }
+        }
+    }
+
+    /// Put a [`Self::snapshot`] back. `Empty` is a no-op; anything this
+    /// backend cannot write is an error rather than a silent loss.
+    fn restore(&self, snapshot: &ClipboardSnapshot) -> Result<(), ClipboardError> {
+        match snapshot {
+            ClipboardSnapshot::Text(text) => self.set_text(text),
+            ClipboardSnapshot::Empty => Ok(()),
+            _ => Err(ClipboardError::unrestorable()),
+        }
     }
 }
 
@@ -241,6 +381,99 @@ mod tests {
         // the other operations.
         clip.set_text("x").unwrap();
         assert_eq!(clip.text().unwrap(), "x");
+    }
+
+    // ---- snapshot / restore ---------------------------------------------
+
+    /// A backend with nothing but `text`/`set_text`, to pin the trait's
+    /// default snapshot and restore.
+    struct TextOnly {
+        read: fn() -> Result<String, ClipboardError>,
+        written: Mutex<Vec<String>>,
+    }
+
+    impl Clipboard for TextOnly {
+        fn set_text(&self, text: &str) -> Result<(), ClipboardError> {
+            self.written.lock().unwrap().push(text.to_owned());
+            Ok(())
+        }
+        fn text(&self) -> Result<String, ClipboardError> {
+            (self.read)()
+        }
+        fn changes(&self) -> Receiver<ClipboardPayload> {
+            std::sync::mpsc::channel().1
+        }
+    }
+
+    fn text_only(read: fn() -> Result<String, ClipboardError>) -> TextOnly {
+        TextOnly {
+            read,
+            written: Mutex::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn default_snapshot_maps_text_empty_and_unreadable() {
+        assert_eq!(
+            text_only(|| Ok("t".into())).snapshot(),
+            ClipboardSnapshot::Text("t".into())
+        );
+        assert_eq!(
+            text_only(|| Err(ClipboardError::Empty)).snapshot(),
+            ClipboardSnapshot::Empty
+        );
+        // Unreadable is not "empty": something is there that we cannot
+        // save, so it must not be treated as safe to overwrite.
+        assert_eq!(
+            text_only(|| Err(ClipboardError::Access("locked".into()))).snapshot(),
+            ClipboardSnapshot::Unsupported
+        );
+    }
+
+    #[test]
+    fn default_restore_writes_text_and_refuses_what_it_cannot_write() {
+        let clip = text_only(|| Ok(String::new()));
+        clip.restore(&ClipboardSnapshot::Text("back".into()))
+            .unwrap();
+        clip.restore(&ClipboardSnapshot::Empty).unwrap();
+        assert_eq!(*clip.written.lock().unwrap(), vec!["back"]);
+
+        let image = ClipboardSnapshot::Image(ImageSnapshot {
+            width: 1,
+            height: 1,
+            rgba: vec![0, 0, 0, 255],
+        });
+        assert!(clip.restore(&image).is_err());
+        assert!(clip.restore(&ClipboardSnapshot::Unsupported).is_err());
+        assert_eq!(
+            clip.written.lock().unwrap().len(),
+            1,
+            "nothing else written"
+        );
+    }
+
+    /// Neither text, an image nor files could be read. Whether that is
+    /// an empty clipboard or one holding a format we cannot represent
+    /// decides between "nothing to lose" and "do not touch it".
+    #[test]
+    fn unreadable_formats_are_unsupported_and_none_is_empty() {
+        assert_eq!(unrepresentable(Some(true)), ClipboardSnapshot::Unsupported);
+        assert_eq!(unrepresentable(Some(false)), ClipboardSnapshot::Empty);
+        // Cannot tell (no way to list formats here): as before this
+        // existed, treat it as empty.
+        assert_eq!(unrepresentable(None), ClipboardSnapshot::Empty);
+    }
+
+    #[test]
+    fn image_debug_does_not_dump_the_pixels() {
+        let image = ImageSnapshot {
+            width: 2,
+            height: 1,
+            rgba: vec![7; 8],
+        };
+        let shown = format!("{image:?}");
+        assert!(shown.contains("2x1"), "{shown}");
+        assert!(!shown.contains("7, 7"), "{shown}");
     }
 
     // ---- SuppressList ---------------------------------------------------

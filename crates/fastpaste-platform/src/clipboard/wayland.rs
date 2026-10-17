@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use wl_clipboard_watch::{Config as WatchConfig, Event as WatchEvent, Transfer, Watcher};
 
-use super::{Clipboard, ClipboardError, ClipboardPayload, SuppressList};
+use super::{Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, SuppressList};
 use crate::take_once::TakeOnceChannel;
 
 /// Polling interval for the legacy fallback loop (no data-control
@@ -327,5 +327,31 @@ impl Clipboard for ArboardClipboard {
 
     fn suppress_text(&self, text: &str) {
         self.suppress.arm(text);
+    }
+
+    fn snapshot(&self) -> ClipboardSnapshot {
+        let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        super::arboard_snapshot(&mut clip, offers_any_format)
+    }
+
+    fn restore(&self, snapshot: &ClipboardSnapshot) -> Result<(), ClipboardError> {
+        let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        super::arboard_restore(&mut clip, snapshot)
+    }
+}
+
+/// Whether the clipboard offers anything at all, through the data-control
+/// protocol. `None` without it (an X11 session, or a compositor that
+/// lacks it): there is then no way to tell an empty clipboard from one
+/// holding a format arboard cannot read.
+fn offers_any_format() -> Option<bool> {
+    use wl_clipboard_rs::paste::{ClipboardType, Error, Seat, get_mime_types};
+    match get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
+        Ok(types) => Some(!types.is_empty()),
+        Err(Error::ClipboardEmpty) => Some(false),
+        Err(e) => {
+            tracing::debug!("could not list clipboard formats: {e}");
+            None
+        }
     }
 }

@@ -26,7 +26,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSG, RegisterClassW, TranslateMessage, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
-use super::{Clipboard, ClipboardError, ClipboardPayload, SuppressList};
+use super::{Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, SuppressList};
 use crate::take_once::TakeOnceChannel;
 
 /// Clipboard read/write plus an event-driven change stream.
@@ -93,6 +93,18 @@ impl Clipboard for WindowsClipboard {
         // Zero means this window station gives us no clipboard access, so
         // the number says nothing.
         (seq != 0).then_some(u64::from(seq))
+    }
+
+    fn snapshot(&self) -> ClipboardSnapshot {
+        use windows_sys::Win32::System::DataExchange::CountClipboardFormats;
+        let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: no arguments; needs no open clipboard.
+        super::arboard_snapshot(&mut clip, || Some(unsafe { CountClipboardFormats() } > 0))
+    }
+
+    fn restore(&self, snapshot: &ClipboardSnapshot) -> Result<(), ClipboardError> {
+        let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        super::arboard_restore(&mut clip, snapshot)
     }
 }
 

@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fastpaste_platform::{
-    Clipboard, ForegroundToken, ForegroundWindow, NullForegroundWindow, PasteKeys, PasteMethod,
+    Clipboard, ClipboardSnapshot, ForegroundToken, ForegroundWindow, NullForegroundWindow,
+    PasteKeys, PasteMethod,
 };
 
 use thiserror::Error;
@@ -16,6 +17,12 @@ pub enum PasteError {
     Clipboard(#[from] fastpaste_platform::ClipboardError),
     #[error("uinput: {0}")]
     Uinput(#[from] fastpaste_platform::PasteKeyError),
+    /// The clipboard holds something that cannot be saved and put back,
+    /// so the paste was cancelled rather than destroy it.
+    #[error(
+        "the clipboard holds content that could not be saved; paste cancelled so it is not lost"
+    )]
+    ClipboardNotSaved,
 }
 
 /// The paste sequence's tunables, as one value so a new one does not
@@ -100,6 +107,9 @@ impl Paster {
     ///  * the restore is skipped when someone else wrote the clipboard
     ///    after the payload went on — a copy the user made mid-sequence is
     ///    newer than the snapshot and wins;
+    ///  * the snapshot keeps images and file lists as well as text, and a
+    ///    clipboard holding anything that cannot be saved cancels the
+    ///    paste instead of being overwritten;
     ///  * the restore runs even when the keystroke fails, so a failed
     ///    paste cannot leave the payload sitting in place of whatever the
     ///    user had copied (that loss was unrecoverable);
@@ -140,16 +150,18 @@ impl Paster {
         let restore = cfg.restore_clipboard;
 
         // Snapshot BEFORE overwriting. `Empty` is not a failure — there
-        // was simply nothing to put back — but a real read error means we
-        // do not know what we are about to destroy, so don't pretend.
+        // was simply nothing to put back. But something we could not save
+        // (a format the backend cannot represent, or a read that failed)
+        // would be destroyed for good, so cancel instead, as the reference
+        // implementation does when its backup fails.
         let snapshot = if restore {
-            match self.clipboard.text() {
-                Ok(text) => Some(text),
-                Err(fastpaste_platform::ClipboardError::Empty) => None,
-                Err(e) => {
-                    tracing::warn!("could not snapshot clipboard before paste: {e}");
-                    None
+            match self.clipboard.snapshot() {
+                ClipboardSnapshot::Empty => None,
+                ClipboardSnapshot::Unsupported => {
+                    tracing::warn!("{}", PasteError::ClipboardNotSaved);
+                    return Err(PasteError::ClipboardNotSaved);
                 }
+                saved => Some(saved),
             }
         } else {
             None
@@ -214,7 +226,7 @@ impl Paster {
     /// would lose it.
     fn restore_unless_replaced(
         &self,
-        snapshot: &str,
+        snapshot: &ClipboardSnapshot,
         payload: &str,
         seq_after_payload: Option<u64>,
     ) {
@@ -245,9 +257,12 @@ impl Paster {
         }
     }
 
-    fn restore(&self, snapshot: &str) {
-        self.clipboard.suppress_text(snapshot);
-        if let Err(e) = self.clipboard.set_text(snapshot) {
+    fn restore(&self, snapshot: &ClipboardSnapshot) {
+        // Only text reaches history, so only text needs announcing.
+        if let ClipboardSnapshot::Text(text) = snapshot {
+            self.clipboard.suppress_text(text);
+        }
+        if let Err(e) = self.clipboard.restore(snapshot) {
             // Report the original failure in preference to this one, but
             // never swallow it silently.
             tracing::error!("could not restore clipboard after paste: {e}");
@@ -282,8 +297,8 @@ impl Paster {
 mod tests {
     use super::*;
     use fastpaste_platform::{
-        Clipboard, ClipboardError, ClipboardPayload, ForegroundToken, ForegroundWindow,
-        NullClipboard, PasteMethod,
+        Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, ForegroundToken,
+        ForegroundWindow, ImageSnapshot, NullClipboard, PasteMethod,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -502,21 +517,21 @@ mod tests {
     }
 
     /// An unreadable clipboard used to arm two suppressions while making
-    /// only one write, leaving one armed forever.
+    /// only one write, leaving one armed forever. It now cancels the paste
+    /// outright — we cannot put back what we could not read — and still
+    /// announces nothing it does not write.
     #[test]
-    fn an_unreadable_clipboard_does_not_over_announce() {
+    fn an_unreadable_clipboard_aborts_without_announcing() {
         let clip = Arc::new(RecordingClipboard::with_unreadable_clipboard());
         let uinput = Arc::new(CountingUinput::new(true));
 
         let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
-        paster.paste_text("payload").unwrap();
+        let err = paster.paste_text("payload").unwrap_err();
 
-        assert_eq!(clip.writes(), vec!["payload"], "nothing to restore");
-        assert_eq!(
-            clip.announced(),
-            vec!["payload"],
-            "and nothing over-announced"
-        );
+        assert!(matches!(err, PasteError::ClipboardNotSaved), "{err:?}");
+        assert!(clip.writes().is_empty(), "nothing written");
+        assert!(clip.announced().is_empty(), "and nothing announced");
+        assert_eq!(uinput.calls(), 0);
     }
 
     #[test]
@@ -1083,5 +1098,118 @@ mod tests {
         let (paster, log) = focus_fixture(true);
         paster.paste_text("payload").unwrap();
         assert_eq!(*log.lock().unwrap(), vec!["send"]);
+    }
+
+    // ---- clipboards that are not text --------------------------------------
+
+    /// A clipboard that can hold what the real backends snapshot — text,
+    /// an image, a file list — or a format they cannot represent at all.
+    struct RichClipboard {
+        contents: Mutex<ClipboardSnapshot>,
+        writes: Mutex<Vec<String>>,
+    }
+
+    impl RichClipboard {
+        fn holding(contents: ClipboardSnapshot) -> Arc<Self> {
+            Arc::new(Self {
+                contents: Mutex::new(contents),
+                writes: Mutex::new(Vec::new()),
+            })
+        }
+        fn contents(&self) -> ClipboardSnapshot {
+            self.contents.lock().unwrap().clone()
+        }
+    }
+
+    impl Clipboard for RichClipboard {
+        fn set_text(&self, text: &str) -> Result<(), ClipboardError> {
+            self.writes.lock().unwrap().push(text.to_owned());
+            *self.contents.lock().unwrap() = ClipboardSnapshot::Text(text.to_owned());
+            Ok(())
+        }
+        fn text(&self) -> Result<String, ClipboardError> {
+            match &*self.contents.lock().unwrap() {
+                ClipboardSnapshot::Text(t) => Ok(t.clone()),
+                _ => Err(ClipboardError::Empty),
+            }
+        }
+        fn changes(&self) -> std::sync::mpsc::Receiver<ClipboardPayload> {
+            std::sync::mpsc::channel().1
+        }
+        fn snapshot(&self) -> ClipboardSnapshot {
+            self.contents()
+        }
+        fn restore(&self, snapshot: &ClipboardSnapshot) -> Result<(), ClipboardError> {
+            *self.contents.lock().unwrap() = snapshot.clone();
+            Ok(())
+        }
+    }
+
+    fn an_image() -> ClipboardSnapshot {
+        ClipboardSnapshot::Image(ImageSnapshot {
+            width: 2,
+            height: 1,
+            rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+        })
+    }
+
+    /// Finding 5. A copied image read as "empty", so nothing was put back
+    /// and the user's image was simply gone after the paste.
+    #[test]
+    fn snapshot_round_trips_an_image() {
+        let clip = RichClipboard::holding(an_image());
+        let uinput = Arc::new(CountingUinput::new(true));
+
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(uinput.calls(), 1, "the paste happened");
+        assert_eq!(*clip.writes.lock().unwrap(), vec!["payload"]);
+        assert_eq!(clip.contents(), an_image(), "and the image came back");
+    }
+
+    /// Same for files copied in a file manager.
+    #[test]
+    fn snapshot_round_trips_a_file_list() {
+        let files = ClipboardSnapshot::Files(vec!["/home/u/a.txt".into(), "/home/u/b.png".into()]);
+        let clip = RichClipboard::holding(files.clone());
+        let uinput = Arc::new(CountingUinput::new(true));
+
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, true));
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(uinput.calls(), 1);
+        assert_eq!(clip.contents(), files);
+    }
+
+    /// Something no backend can save and put back. The reference
+    /// implementation cancels the paste when its backup fails, and so do
+    /// we: the user's clipboard is not touched and no keystroke is sent.
+    #[test]
+    fn snapshot_non_text_is_preserved_or_paste_aborts() {
+        let clip = RichClipboard::holding(ClipboardSnapshot::Unsupported);
+        let uinput = Arc::new(CountingUinput::new(true));
+
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
+        let err = paster.paste_text("payload").unwrap_err();
+
+        assert!(matches!(err, PasteError::ClipboardNotSaved), "{err:?}");
+        assert_eq!(uinput.calls(), 0, "no keystroke");
+        assert!(clip.writes.lock().unwrap().is_empty(), "nothing written");
+        assert_eq!(clip.contents(), ClipboardSnapshot::Unsupported, "intact");
+    }
+
+    /// With restoring switched off the user has said the clipboard is
+    /// ours to overwrite, so there is nothing to protect.
+    #[test]
+    fn without_restore_an_unsupported_clipboard_is_still_pasted_over() {
+        let clip = RichClipboard::holding(ClipboardSnapshot::Unsupported);
+        let uinput = Arc::new(CountingUinput::new(true));
+
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ false));
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(uinput.calls(), 1);
+        assert_eq!(clip.contents(), ClipboardSnapshot::Text("payload".into()));
     }
 }

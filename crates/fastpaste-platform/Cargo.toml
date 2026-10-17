@@ -42,6 +42,10 @@ arboard = { version = "3.6", features = ["wayland-data-control"] }
 # API in any published version (verified against docs.rs, 2026-08) — the
 # watch surface lives only in the separate wl-clipboard-rs-tools binary.
 wl-clipboard-watch = "0.1"
+# Listing the offered MIME types, so a snapshot can tell an empty clipboard
+# from one holding a format arboard cannot read. Already in the build
+# through arboard's wayland-data-control; named here only to call it.
+wl-clipboard-rs = "0.9"
 libc = "0.2"   # poll(2) for the hotkey reader's blocking loop
 x11rb = "0.13"
 
