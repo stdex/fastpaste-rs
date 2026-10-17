@@ -43,6 +43,14 @@ pub enum PasteKeyError {
     Rejected { sent: u32, expected: u32 },
 }
 
+/// Which chord pastes. Ctrl+V is what nearly every application takes;
+/// the choice exists for the ones that do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PasteMethod {
+    #[default]
+    CtrlV,
+}
+
 pub trait PasteKeys: Send + Sync {
     /// Whether this is a real device backend rather than the no-op one.
     ///

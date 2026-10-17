@@ -160,6 +160,11 @@ pub struct PasteSettings {
     /// Whether to restore the user's previous clipboard contents after paste.
     #[serde(default = "PasteSettings::default_restore_clipboard")]
     pub restore_clipboard: bool,
+    /// Milliseconds to wait after the keystroke before restoring the
+    /// clipboard. The keystroke is only queued, so restoring at once let
+    /// the target read the old clipboard instead of the snippet.
+    #[serde(default = "PasteSettings::default_restore_delay_ms")]
+    pub restore_delay_ms: u64,
 }
 
 impl PasteSettings {
@@ -169,6 +174,9 @@ impl PasteSettings {
     fn default_restore_clipboard() -> bool {
         true
     }
+    fn default_restore_delay_ms() -> u64 {
+        120
+    }
 }
 
 impl Default for PasteSettings {
@@ -176,6 +184,7 @@ impl Default for PasteSettings {
         Self {
             delay_ms: Self::default_delay_ms(),
             restore_clipboard: Self::default_restore_clipboard(),
+            restore_delay_ms: Self::default_restore_delay_ms(),
         }
     }
 }
@@ -195,6 +204,9 @@ pub const MAX_ITEMS_RANGE: std::ops::RangeInclusive<u32> = 1..=500;
 /// Accepted range for `paste.delay_ms`. The upper bound keeps a typo from
 /// wedging the paste worker thread for what looks like forever.
 pub const DELAY_MS_RANGE: std::ops::RangeInclusive<u64> = 0..=5_000;
+
+/// Accepted range for `paste.restore_delay_ms`, bounded for the same reason.
+pub const RESTORE_DELAY_MS_RANGE: std::ops::RangeInclusive<u64> = 0..=5_000;
 
 impl Settings {
     /// Where the config file lives. Resolved via the shared [`crate::paths`]
@@ -236,6 +248,19 @@ impl Settings {
                 DELAY_MS_RANGE,
             );
             self.paste.delay_ms = delay_ms;
+        }
+
+        let restore_delay_ms = self.paste.restore_delay_ms.clamp(
+            *RESTORE_DELAY_MS_RANGE.start(),
+            *RESTORE_DELAY_MS_RANGE.end(),
+        );
+        if restore_delay_ms != self.paste.restore_delay_ms {
+            tracing::warn!(
+                "paste.restore_delay_ms {} out of range {:?}; using {restore_delay_ms}",
+                self.paste.restore_delay_ms,
+                RESTORE_DELAY_MS_RANGE,
+            );
+            self.paste.restore_delay_ms = restore_delay_ms;
         }
     }
 
@@ -332,6 +357,7 @@ mod tests {
             s.paste.restore_clipboard,
             "`restore_clipboard` must default true"
         );
+        assert_eq!(s.paste.restore_delay_ms, 120);
     }
 
     /// Save -> load must round-trip exactly, through the real
@@ -362,6 +388,7 @@ mod tests {
             paste: PasteSettings {
                 delay_ms: 123,
                 restore_clipboard: false,
+                restore_delay_ms: 456,
             },
         };
 
@@ -376,6 +403,7 @@ mod tests {
         assert_eq!(loaded.clipboard_history.position, HistoryPosition::Top);
         assert_eq!(loaded.paste.delay_ms, 123);
         assert!(!loaded.paste.restore_clipboard);
+        assert_eq!(loaded.paste.restore_delay_ms, 456);
 
         // `dir` removes itself (and config.toml) on drop.
     }
@@ -453,6 +481,23 @@ mod tests {
         assert_eq!(loaded.paste.delay_ms, 90);
     }
 
+    /// A `[paste]` section written before `restore_delay_ms` existed keeps
+    /// its own values and takes the default for the new one.
+    #[test]
+    fn a_paste_section_without_restore_delay_takes_the_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[paste]\ndelay_ms = 90\nrestore_clipboard = false\n").unwrap();
+
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.paste.delay_ms, 90);
+        assert!(!loaded.paste.restore_clipboard);
+        assert_eq!(
+            loaded.paste.restore_delay_ms,
+            PasteSettings::default().restore_delay_ms
+        );
+    }
+
     #[test]
     fn a_missing_file_loads_defaults_without_creating_it() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -500,13 +545,14 @@ mod tests {
         std::fs::write(
             &path,
             "[clipboard_history]\nmax_items = 4000000000\n\n\
-             [paste]\ndelay_ms = 999999999\n",
+             [paste]\ndelay_ms = 999999999\nrestore_delay_ms = 999999999\n",
         )
         .unwrap();
 
         let loaded = Settings::load_from(&path).unwrap();
         assert_eq!(loaded.clipboard_history.max_items, *MAX_ITEMS_RANGE.end());
         assert_eq!(loaded.paste.delay_ms, *DELAY_MS_RANGE.end());
+        assert_eq!(loaded.paste.restore_delay_ms, *RESTORE_DELAY_MS_RANGE.end());
     }
 
     #[test]
@@ -537,5 +583,6 @@ mod tests {
         let d = Settings::default();
         assert!(MAX_ITEMS_RANGE.contains(&d.clipboard_history.max_items));
         assert!(DELAY_MS_RANGE.contains(&d.paste.delay_ms));
+        assert!(RESTORE_DELAY_MS_RANGE.contains(&d.paste.restore_delay_ms));
     }
 }

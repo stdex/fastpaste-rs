@@ -1,11 +1,10 @@
-//! Paster: 4-step paste sequence (snapshot -> set payload -> wait -> Ctrl+V ->
-//! restore) on Wayland. The simplest service thanks to the spike findings.
+//! Paster: the paste sequence (snapshot -> set payload -> settle -> Ctrl+V ->
+//! settle -> restore), over the platform's clipboard and keystroke seams.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fastpaste_platform::{Clipboard, PasteKeys};
+use fastpaste_platform::{Clipboard, PasteKeys, PasteMethod};
 
 use thiserror::Error;
 
@@ -17,13 +16,27 @@ pub enum PasteError {
     Uinput(#[from] fastpaste_platform::PasteKeyError),
 }
 
+/// The paste sequence's tunables, as one value so a new one does not
+/// reorder every constructor call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PasteConfig {
+    /// Wait between writing the payload and the keystroke, so the target
+    /// has focus back and the clipboard owner is ready to serve.
+    pub delay_ms: u64,
+    pub restore_clipboard: bool,
+    /// Wait between the keystroke and putting the user's clipboard back.
+    /// The keystroke is only *queued*; the target reads the clipboard
+    /// whenever it gets round to processing it.
+    pub restore_delay_ms: u64,
+    pub method: PasteMethod,
+}
+
 pub struct Paster {
     clipboard: Arc<dyn Clipboard>,
     uinput: Arc<dyn PasteKeys>,
     /// Interior-mutable so the Options dialog's Apply can retune the paste
     /// sequence at runtime (the Arc<Paster> is shared with UI threads).
-    delay_ms: AtomicU64,
-    restore_clipboard: AtomicBool,
+    config: Mutex<PasteConfig>,
     /// Guards a whole paste sequence.
     ///
     /// The GUI spawns a fresh worker thread per invocation, so a
@@ -45,32 +58,35 @@ impl Paster {
     pub fn new(
         clipboard: Arc<dyn Clipboard>,
         uinput: Arc<dyn PasteKeys>,
-        delay_ms: u64,
-        restore_clipboard: bool,
+        cfg: PasteConfig,
     ) -> Self {
         Self {
             clipboard,
             uinput,
-            delay_ms: AtomicU64::new(delay_ms),
-            restore_clipboard: AtomicBool::new(restore_clipboard),
+            config: Mutex::new(cfg),
             sequence: Mutex::new(()),
         }
     }
 
     /// Update the tunables (Options-dialog Apply).
-    pub fn set_config(&self, delay_ms: u64, restore_clipboard: bool) {
-        self.delay_ms.store(delay_ms, Ordering::Release);
-        self.restore_clipboard
-            .store(restore_clipboard, Ordering::Release);
+    pub fn set_config(&self, cfg: PasteConfig) {
+        *self.config.lock().unwrap_or_else(|e| e.into_inner()) = cfg;
     }
 
     /// Paste `payload` into the focused application.
     ///
     /// The sequence is: snapshot the clipboard, write the payload, wait
-    /// for the compositor to serve it, emit Ctrl+V, then put the snapshot
-    /// back. Every step after the first write has to unwind correctly,
-    /// because the thing being borrowed is the user's clipboard:
+    /// `delay_ms` for focus and the clipboard owner to settle, emit Ctrl+V,
+    /// wait `restore_delay_ms` for the target to read the payload, then put
+    /// the snapshot back. Every step after the first write has to unwind
+    /// correctly, because the thing being borrowed is the user's clipboard:
     ///
+    ///  * the wait after the keystroke is not optional: the keystroke is
+    ///    only queued, and restoring straight after it made the target
+    ///    paste the user's *old* clipboard;
+    ///  * the restore is skipped when someone else wrote the clipboard
+    ///    after the payload went on — a copy the user made mid-sequence is
+    ///    newer than the snapshot and wins;
     ///  * the restore runs even when the keystroke fails, so a failed
     ///    paste cannot leave the payload sitting in place of whatever the
     ///    user had copied (that loss was unrecoverable);
@@ -100,8 +116,9 @@ impl Paster {
             }
         };
 
-        let delay_ms = self.delay_ms.load(Ordering::Acquire);
-        let restore = self.restore_clipboard.load(Ordering::Acquire);
+        let cfg = *self.config.lock().unwrap_or_else(|e| e.into_inner());
+        let delay_ms = cfg.delay_ms;
+        let restore = cfg.restore_clipboard;
 
         // Snapshot BEFORE overwriting. `Empty` is not a failure — there
         // was simply nothing to put back — but a real read error means we
@@ -124,7 +141,12 @@ impl Paster {
         // including a failed payload write, which can still have cleared
         // the selection before failing.
         self.clipboard.suppress_text(payload);
-        let outcome = match self.clipboard.set_text(payload) {
+        let written = self.clipboard.set_text(payload);
+        let payload_written = written.is_ok();
+        // Read straight after our own write, so the only thing that can
+        // move it from here is somebody else's.
+        let seq_after_payload = self.clipboard.sequence();
+        let outcome = match written {
             Ok(()) => self.emit_paste(delay_ms),
             Err(e) => Err(PasteError::from(e)),
         };
@@ -132,23 +154,79 @@ impl Paster {
         // `emitted` is the question the restore hinges on: was a keystroke
         // actually delivered? If not, the payload has to stay put.
         match (&outcome, snapshot) {
-            (Ok(true), Some(snap)) | (Err(_), Some(snap)) => {
-                self.clipboard.suppress_text(&snap);
-                if let Err(e) = self.clipboard.set_text(&snap) {
-                    // Report the original failure in preference to this
-                    // one, but never swallow it silently.
-                    tracing::error!("could not restore clipboard after paste: {e}");
-                }
-            }
             (Ok(false), _) => {
                 tracing::warn!(
                     "/dev/uinput unavailable; payload left on clipboard, user must Ctrl+V"
                 );
             }
             (_, None) => {}
+            // The payload write itself failed: no keystroke, no wait, so
+            // nobody else can have written since. Put the snapshot back
+            // unconditionally — a write that cleared the clipboard before
+            // failing must not read as "the user copied something new".
+            (_, Some(snap)) if !payload_written => self.restore(&snap),
+            (Ok(true), Some(snap)) => {
+                // The keystroke is only queued: the target reads the
+                // clipboard when it gets round to it, and restoring before
+                // then pastes the user's old clipboard instead of the
+                // snippet.
+                if cfg.restore_delay_ms > 0 {
+                    std::thread::sleep(Duration::from_millis(cfg.restore_delay_ms));
+                }
+                self.restore_unless_replaced(&snap, payload, seq_after_payload);
+            }
+            (Err(_), Some(snap)) => {
+                self.restore_unless_replaced(&snap, payload, seq_after_payload);
+            }
         }
 
         outcome.map(|_| ())
+    }
+
+    /// Put `snapshot` back, unless the clipboard has stopped holding our
+    /// payload. If the user copied something while the sequence was
+    /// waiting, that copy is newer than the snapshot and overwriting it
+    /// would lose it.
+    fn restore_unless_replaced(
+        &self,
+        snapshot: &str,
+        payload: &str,
+        seq_after_payload: Option<u64>,
+    ) {
+        if self.replaced_since_payload(payload, seq_after_payload) {
+            tracing::info!("clipboard changed during the paste; keeping it instead of restoring");
+            return;
+        }
+        self.restore(snapshot);
+    }
+
+    /// Whether anyone else has written the clipboard since our payload.
+    /// The OS sequence number answers that exactly where there is one;
+    /// otherwise the contents no longer being the payload is the sign.
+    fn replaced_since_payload(&self, payload: &str, seq_after_payload: Option<u64>) -> bool {
+        if let (Some(before), Some(now)) = (seq_after_payload, self.clipboard.sequence()) {
+            return before != now;
+        }
+        match self.clipboard.text() {
+            Ok(current) => current != payload,
+            // Something that is not text replaced it.
+            Err(fastpaste_platform::ClipboardError::Empty) => true,
+            // Cannot tell. Restoring is what the sequence did before this
+            // check existed, and leaves the user's own clipboard in place.
+            Err(e) => {
+                tracing::warn!("could not re-read clipboard before restoring: {e}");
+                false
+            }
+        }
+    }
+
+    fn restore(&self, snapshot: &str) {
+        self.clipboard.suppress_text(snapshot);
+        if let Err(e) = self.clipboard.set_text(snapshot) {
+            // Report the original failure in preference to this one, but
+            // never swallow it silently.
+            tracing::error!("could not restore clipboard after paste: {e}");
+        }
     }
 
     /// Wait out the settle delay and emit Ctrl+V. `Ok(false)` means there
@@ -171,8 +249,24 @@ impl Paster {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastpaste_platform::{Clipboard, ClipboardError, ClipboardPayload, NullClipboard};
+    use fastpaste_platform::{
+        Clipboard, ClipboardError, ClipboardPayload, NullClipboard, PasteMethod,
+    };
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Instant;
+
+    /// A config with no settle after the keystroke, so the existing
+    /// sequence tests stay instant; the tests that are about that settle
+    /// set `restore_delay_ms` themselves.
+    fn cfg(delay_ms: u64, restore_clipboard: bool) -> PasteConfig {
+        PasteConfig {
+            delay_ms,
+            restore_clipboard,
+            restore_delay_ms: 0,
+            method: PasteMethod::CtrlV,
+        }
+    }
 
     /// A PasteKeys impl that counts `send_ctrl_v` calls, and can be
     /// told to fail the way a revoked or dead device does.
@@ -220,12 +314,7 @@ mod tests {
         // Pre-set something so we can verify restore.
         clip.set_text("orig").unwrap();
 
-        let paster = Paster::new(
-            clip.clone(),
-            uinput.clone(),
-            /*delay=*/ 0,
-            /*restore=*/ true,
-        );
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(uinput.calls(), 1, "send_ctrl_v must fire exactly once");
@@ -238,7 +327,7 @@ mod tests {
         let clip = Arc::new(NullClipboard::new());
         let uinput = Arc::new(CountingUinput::new(true));
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, /*restore=*/ false);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ false));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(clip.text().unwrap(), "payload");
@@ -250,7 +339,7 @@ mod tests {
         let clip = Arc::new(NullClipboard::new());
         let uinput = Arc::new(CountingUinput::new(/*available=*/ false));
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, /*restore=*/ false);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ false));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(
@@ -338,7 +427,7 @@ mod tests {
         clip.set_text("orig").unwrap();
         clip.writes.lock().unwrap().clear();
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, true);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(clip.writes(), vec!["payload", "orig"]);
@@ -354,7 +443,7 @@ mod tests {
         let clip = Arc::new(RecordingClipboard::new());
         let uinput = Arc::new(CountingUinput::new(true));
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, false);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ false));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(clip.writes(), vec!["payload"]);
@@ -368,7 +457,7 @@ mod tests {
         let clip = Arc::new(RecordingClipboard::with_unreadable_clipboard());
         let uinput = Arc::new(CountingUinput::new(true));
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, /*restore=*/ true);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(clip.writes(), vec!["payload"], "nothing to restore");
@@ -384,7 +473,7 @@ mod tests {
         let clip = Arc::new(RecordingClipboard::with_empty_clipboard());
         let uinput = Arc::new(CountingUinput::new(true));
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, true);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         paster
             .paste_text("payload")
             .expect("an empty clipboard is normal");
@@ -401,7 +490,7 @@ mod tests {
         let uinput = Arc::new(CountingUinput::new(/*available=*/ false));
         clip.set_text("orig").unwrap();
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, /*restore=*/ true);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         paster.paste_text("payload").unwrap();
 
         assert_eq!(uinput.calls(), 0);
@@ -420,7 +509,7 @@ mod tests {
         let uinput = Arc::new(CountingUinput::failing());
         clip.set_text("something precious").unwrap();
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, /*restore=*/ true);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         let err = paster.paste_text("payload").unwrap_err();
 
         assert!(
@@ -441,7 +530,7 @@ mod tests {
         clip.set_text("orig").unwrap();
         clip.writes.lock().unwrap().clear();
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, true);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         let _ = paster.paste_text("payload");
 
         assert_eq!(clip.writes(), vec!["payload", "orig"]);
@@ -519,7 +608,11 @@ mod tests {
         clip.set_text("orig").unwrap(); // setup, while still unarmed
         clip.writes.lock().unwrap().clear();
 
-        let paster = Arc::new(Paster::new(clip.clone(), uinput.clone(), 0, true));
+        let paster = Arc::new(Paster::new(
+            clip.clone(),
+            uinput.clone(),
+            cfg(0, /*restore=*/ true),
+        ));
         let (entered, release) = clip.arm();
 
         let first = {
@@ -559,7 +652,11 @@ mod tests {
         clip.set_text("orig").unwrap();
         clip.writes.lock().unwrap().clear();
 
-        let paster = Arc::new(Paster::new(clip.clone(), uinput.clone(), 5, true));
+        let paster = Arc::new(Paster::new(
+            clip.clone(),
+            uinput.clone(),
+            cfg(5, /*restore=*/ true),
+        ));
         let mut handles = Vec::new();
         for i in 0..4 {
             let paster = Arc::clone(&paster);
@@ -597,12 +694,246 @@ mod tests {
         let uinput = Arc::new(CountingUinput::new(true));
         clip.set_text("orig").unwrap();
 
-        let paster = Paster::new(clip.clone(), uinput.clone(), 0, /*restore=*/ false);
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ false));
         paster.paste_text("a").unwrap();
         assert_eq!(clip.text().unwrap(), "a", "no restore yet");
 
-        paster.set_config(0, /*restore=*/ true);
+        paster.set_config(cfg(0, /*restore=*/ true));
         paster.paste_text("b").unwrap();
         assert_eq!(clip.text().unwrap(), "a", "restore is live now");
+    }
+
+    // ---- settle after the keystroke, and the mid-paste copy guard -------
+
+    /// A clipboard modelled on Windows' `GetClipboardSequenceNumber`:
+    /// every change bumps a counter, whoever makes it. `external_copy`
+    /// stands in for the user copying something in another window — it
+    /// changes the contents without going through `set_text`, so it never
+    /// appears in `writes`.
+    ///
+    /// Built with `sequenced = false` it reports no sequence, like the
+    /// Wayland backend, and the paster has to compare contents instead.
+    struct SequencedClipboard {
+        contents: Mutex<Option<String>>,
+        seq: AtomicU64,
+        sequenced: bool,
+        /// The next `set_text` clears the clipboard and then fails, the
+        /// way a write that loses the selection halfway can.
+        fail_next_write: AtomicBool,
+        writes: Mutex<Vec<(String, Instant)>>,
+    }
+
+    impl SequencedClipboard {
+        fn new(sequenced: bool) -> Arc<Self> {
+            Arc::new(Self {
+                contents: Mutex::new(None),
+                seq: AtomicU64::new(0),
+                sequenced,
+                fail_next_write: AtomicBool::new(false),
+                writes: Mutex::new(Vec::new()),
+            })
+        }
+        fn external_copy(&self, text: &str) {
+            *self.contents.lock().unwrap() = Some(text.to_owned());
+            self.seq.fetch_add(1, Ordering::SeqCst);
+        }
+        fn clear_writes(&self) {
+            self.writes.lock().unwrap().clear();
+        }
+        fn writes(&self) -> Vec<String> {
+            self.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(t, _)| t.clone())
+                .collect()
+        }
+        fn written_at(&self, text: &str) -> Instant {
+            self.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(t, _)| t == text)
+                .map(|(_, at)| *at)
+                .unwrap_or_else(|| panic!("{text:?} was never written"))
+        }
+    }
+
+    impl Clipboard for SequencedClipboard {
+        fn set_text(&self, text: &str) -> Result<(), ClipboardError> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((text.to_owned(), Instant::now()));
+            self.seq.fetch_add(1, Ordering::SeqCst);
+            if self.fail_next_write.swap(false, Ordering::SeqCst) {
+                *self.contents.lock().unwrap() = None;
+                return Err(ClipboardError::Access("selection lost".into()));
+            }
+            *self.contents.lock().unwrap() = Some(text.to_owned());
+            Ok(())
+        }
+        fn text(&self) -> Result<String, ClipboardError> {
+            self.contents
+                .lock()
+                .unwrap()
+                .clone()
+                .ok_or(ClipboardError::Empty)
+        }
+        fn changes(&self) -> std::sync::mpsc::Receiver<ClipboardPayload> {
+            std::sync::mpsc::channel().1
+        }
+        fn sequence(&self) -> Option<u64> {
+            self.sequenced.then(|| self.seq.load(Ordering::SeqCst))
+        }
+    }
+
+    /// PasteKeys that timestamps each keystroke and runs `on_send` inside
+    /// it — standing in for whatever happens between the keystroke and the
+    /// restore, such as the user copying something else.
+    struct HookUinput {
+        sent_at: Mutex<Vec<Instant>>,
+        on_send: Box<dyn Fn() + Send + Sync>,
+    }
+
+    impl HookUinput {
+        fn new(on_send: impl Fn() + Send + Sync + 'static) -> Arc<Self> {
+            Arc::new(Self {
+                sent_at: Mutex::new(Vec::new()),
+                on_send: Box::new(on_send),
+            })
+        }
+        fn sent_at(&self) -> Instant {
+            let sent = self.sent_at.lock().unwrap();
+            assert_eq!(sent.len(), 1, "exactly one keystroke");
+            sent[0]
+        }
+    }
+
+    impl PasteKeys for HookUinput {
+        fn available(&self) -> bool {
+            true
+        }
+        fn send_ctrl_v(&self) -> Result<(), fastpaste_platform::PasteKeyError> {
+            self.sent_at.lock().unwrap().push(Instant::now());
+            (self.on_send)();
+            Ok(())
+        }
+    }
+
+    /// Finding 1. `SendInput` and uinput only *queue* the keystroke; the
+    /// target reads the clipboard some time later. Restoring straight
+    /// after `send` let it read the user's OLD clipboard — the Wine replay
+    /// pasted the snippet 0 times out of 12. The restore has to wait out
+    /// `restore_delay_ms` after the keystroke, while the focus-settle
+    /// `delay_ms` still comes before it.
+    #[test]
+    fn restore_happens_after_the_keystroke_not_before() {
+        const SETTLE: Duration = Duration::from_millis(30);
+        const AFTER: Duration = Duration::from_millis(60);
+        let clip = SequencedClipboard::new(true);
+        clip.set_text("orig").unwrap();
+        clip.clear_writes();
+        let uinput = HookUinput::new(|| {});
+
+        let paster = Paster::new(
+            clip.clone(),
+            uinput.clone(),
+            PasteConfig {
+                delay_ms: SETTLE.as_millis() as u64,
+                restore_clipboard: true,
+                restore_delay_ms: AFTER.as_millis() as u64,
+                method: PasteMethod::CtrlV,
+            },
+        );
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(clip.writes(), vec!["payload", "orig"]);
+        let sent = uinput.sent_at();
+        assert!(
+            sent.duration_since(clip.written_at("payload")) >= SETTLE,
+            "the focus settle belongs before the keystroke"
+        );
+        let waited = clip.written_at("orig").duration_since(sent);
+        assert!(
+            waited >= AFTER,
+            "the restore came {waited:?} after the keystroke; the target \
+             never had a chance to read the payload"
+        );
+    }
+
+    /// The user copies something while the sequence is still waiting to
+    /// restore. That copy is newer than the snapshot and must win; writing
+    /// the stale snapshot over it would silently lose it.
+    #[test]
+    fn restore_is_skipped_when_clipboard_changed_mid_paste() {
+        let clip = SequencedClipboard::new(true);
+        clip.set_text("orig").unwrap();
+        clip.clear_writes();
+        let watched = Arc::clone(&clip);
+        let uinput = HookUinput::new(move || watched.external_copy("copied mid-paste"));
+
+        let paster = Paster::new(clip.clone(), uinput, cfg(0, /*restore=*/ true));
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(
+            clip.writes(),
+            vec!["payload"],
+            "the stale snapshot must not be written back"
+        );
+        assert_eq!(clip.text().unwrap(), "copied mid-paste");
+    }
+
+    /// Without a sequence number (Wayland) the change is detected by the
+    /// contents no longer being the payload.
+    #[test]
+    fn restore_is_skipped_when_text_changed_mid_paste_without_a_sequence() {
+        let clip = SequencedClipboard::new(/*sequenced=*/ false);
+        clip.set_text("orig").unwrap();
+        clip.clear_writes();
+        let watched = Arc::clone(&clip);
+        let uinput = HookUinput::new(move || watched.external_copy("copied mid-paste"));
+
+        let paster = Paster::new(clip.clone(), uinput, cfg(0, /*restore=*/ true));
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(clip.writes(), vec!["payload"]);
+        assert_eq!(clip.text().unwrap(), "copied mid-paste");
+    }
+
+    /// The guard must not fire on an ordinary paste: nothing changed, so
+    /// the snapshot goes back.
+    #[test]
+    fn restore_runs_when_sequence_is_unchanged() {
+        let clip = SequencedClipboard::new(true);
+        clip.set_text("orig").unwrap();
+        clip.clear_writes();
+
+        let paster = Paster::new(clip.clone(), HookUinput::new(|| {}), cfg(0, true));
+        paster.paste_text("payload").unwrap();
+
+        assert_eq!(clip.writes(), vec!["payload", "orig"]);
+        assert_eq!(clip.text().unwrap(), "orig");
+    }
+
+    /// A payload write that fails can still have cleared the clipboard.
+    /// No keystroke went out and nobody else wrote, so the guard has
+    /// nothing to protect and the snapshot must go back — an emptied
+    /// clipboard must not read as "the user copied something new".
+    #[test]
+    fn a_failed_payload_write_still_restores_the_snapshot() {
+        let clip = SequencedClipboard::new(/*sequenced=*/ false);
+        clip.set_text("orig").unwrap();
+        clip.clear_writes();
+        clip.fail_next_write.store(true, Ordering::SeqCst);
+
+        let uinput = HookUinput::new(|| {});
+        let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, true));
+        let err = paster.paste_text("payload").unwrap_err();
+
+        assert!(matches!(err, PasteError::Clipboard(_)));
+        assert!(uinput.sent_at.lock().unwrap().is_empty(), "no keystroke");
+        assert_eq!(clip.writes(), vec!["payload", "orig"]);
+        assert_eq!(clip.text().unwrap(), "orig");
     }
 }

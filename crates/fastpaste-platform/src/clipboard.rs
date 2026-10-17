@@ -89,6 +89,17 @@ pub trait Clipboard: Send + Sync {
     ///
     /// Backends without change introspection ignore this.
     fn suppress_text(&self, _text: &str) {}
+
+    /// A counter the OS bumps on every clipboard change, whoever makes
+    /// it, or `None` where there is no such thing.
+    ///
+    /// The paste sequence reads it right after writing its payload and
+    /// again before putting the user's snapshot back: if it moved, someone
+    /// copied in between, and that newer copy must not be overwritten.
+    /// Without a sequence the caller has to compare contents instead.
+    fn sequence(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// How long an announced own-write stays armed. Comfortably longer than

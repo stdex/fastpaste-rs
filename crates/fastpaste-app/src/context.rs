@@ -11,8 +11,8 @@ use fastpaste_platform::{
 use single_instance::SingleInstance;
 
 use crate::clipboard_history::ClipboardHistory;
-use crate::paster::Paster;
-use crate::settings::Settings;
+use crate::paster::{PasteConfig, Paster};
+use crate::settings::{PasteSettings, Settings};
 
 /// Account name under which the database passphrase is filed in the
 /// credential store. One database per user, so one fixed name.
@@ -90,8 +90,7 @@ impl AppContext {
     /// reachable from here — the README promises settings apply live, and
     /// anything missed is a control that silently needs a restart.
     pub fn set_settings(&self, s: Settings) {
-        self.paster
-            .set_config(s.paste.delay_ms, s.paste.restore_clipboard);
+        self.paster.set_config(paste_config(&s.paste));
         self.clipboard_history
             .set_enabled(s.clipboard_history.enabled);
         self.clipboard_history
@@ -118,8 +117,7 @@ impl AppContext {
         let paster = Arc::new(Paster::new(
             clipboard.clone(),
             uinput.clone(),
-            settings.paste.delay_ms,
-            settings.paste.restore_clipboard,
+            paste_config(&settings.paste),
         ));
         let clipboard_history = Arc::new(ClipboardHistory::new(
             settings.clipboard_history.max_items as usize,
@@ -137,6 +135,16 @@ impl AppContext {
             db_path,
             secret_store,
         }
+    }
+}
+
+/// The paste sequence's view of the settings.
+fn paste_config(p: &PasteSettings) -> PasteConfig {
+    PasteConfig {
+        delay_ms: p.delay_ms,
+        restore_clipboard: p.restore_clipboard,
+        restore_delay_ms: p.restore_delay_ms,
+        method: fastpaste_platform::PasteMethod::CtrlV,
     }
 }
 
@@ -369,9 +377,11 @@ impl AppContext {
 
         tracing::info!(
             "loaded settings: paste.delay_ms={}, paste.restore_clipboard={}, \
-             clipboard_history.enabled={}, clipboard_history.max_items={}",
+             paste.restore_delay_ms={}, clipboard_history.enabled={}, \
+             clipboard_history.max_items={}",
             settings.paste.delay_ms,
             settings.paste.restore_clipboard,
+            settings.paste.restore_delay_ms,
             settings.clipboard_history.enabled,
             settings.clipboard_history.max_items,
         );

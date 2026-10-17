@@ -27,7 +27,7 @@ pub use clipboard::{Clipboard, ClipboardError, ClipboardPayload, NullClipboard};
 pub use hotkey::{
     GlobalHotkey, HotkeyError, NullGlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID,
 };
-pub use paste_keys::{NullPasteKeys, PasteKeyError, PasteKeys};
+pub use paste_keys::{NullPasteKeys, PasteKeyError, PasteKeys, PasteMethod};
 pub use secret_store::{NullSecretStore, SecretStore, SecretStoreError, UnavailableSecretStore};
 pub use take_once::TakeOnceChannel;
 

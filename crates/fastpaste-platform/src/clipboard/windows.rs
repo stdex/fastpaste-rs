@@ -85,6 +85,15 @@ impl Clipboard for WindowsClipboard {
     fn suppress_text(&self, text: &str) {
         self.suppress.arm(text);
     }
+
+    fn sequence(&self) -> Option<u64> {
+        use windows_sys::Win32::System::DataExchange::GetClipboardSequenceNumber;
+        // SAFETY: no arguments, no preconditions.
+        let seq = unsafe { GetClipboardSequenceNumber() };
+        // Zero means this window station gives us no clipboard access, so
+        // the number says nothing.
+        (seq != 0).then_some(u64::from(seq))
+    }
 }
 
 /// State the window procedure needs, handed over through the window's
