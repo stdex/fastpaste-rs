@@ -25,7 +25,9 @@
 //! reach in directly — from any other thread these slots are simply
 //! empty.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+
+use fastpaste_platform::ForegroundToken;
 
 use crate::{FastpasteTray, MainWindow, OptionsDialog, SelectionDialog};
 
@@ -40,6 +42,19 @@ struct Ui {
 
 thread_local! {
     static UI: RefCell<Ui> = RefCell::new(Ui::default());
+    /// The window the selection dialog's next pick pastes into, captured
+    /// when the hotkey fired. Per invocation, while the dialog is a
+    /// singleton that outlives invocations — so it lives here, not in a
+    /// closure.
+    static DIALOG_TARGET: Cell<ForegroundToken> = Cell::new(ForegroundToken::default());
+}
+
+pub fn set_dialog_target(target: ForegroundToken) {
+    DIALOG_TARGET.with(|t| t.set(target));
+}
+
+pub fn dialog_target() -> ForegroundToken {
+    DIALOG_TARGET.with(Cell::get)
 }
 
 /// Keep `win` alive until it is explicitly released.

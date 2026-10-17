@@ -4,7 +4,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fastpaste_platform::{Clipboard, PasteKeys, PasteMethod};
+use fastpaste_platform::{
+    Clipboard, ForegroundToken, ForegroundWindow, NullForegroundWindow, PasteKeys, PasteMethod,
+};
 
 use thiserror::Error;
 
@@ -34,6 +36,9 @@ pub struct PasteConfig {
 pub struct Paster {
     clipboard: Arc<dyn Clipboard>,
     uinput: Arc<dyn PasteKeys>,
+    /// Gives focus back to the window the paste is meant for. The null
+    /// backend unless [`Self::with_foreground`] supplies a real one.
+    foreground: Arc<dyn ForegroundWindow>,
     /// Interior-mutable so the Options dialog's Apply can retune the paste
     /// sequence at runtime (the Arc<Paster> is shared with UI threads).
     config: Mutex<PasteConfig>,
@@ -63,9 +68,17 @@ impl Paster {
         Self {
             clipboard,
             uinput,
+            foreground: Arc::new(NullForegroundWindow),
             config: Mutex::new(cfg),
             sequence: Mutex::new(()),
         }
+    }
+
+    /// Use `foreground` to give the target window focus back before the
+    /// keystroke.
+    pub fn with_foreground(mut self, foreground: Arc<dyn ForegroundWindow>) -> Self {
+        self.foreground = foreground;
+        self
     }
 
     /// Update the tunables (Options-dialog Apply).
@@ -105,6 +118,12 @@ impl Paster {
     ///    backend's TTL, and until then can only ever swallow a
     ///    byte-identical copy.)
     pub fn paste_text(&self, payload: &str) -> Result<(), PasteError> {
+        self.paste_text_to(payload, &ForegroundToken::default())
+    }
+
+    /// [`Self::paste_text`] into the window `target` captured, which gets
+    /// focus back first. An empty token leaves focus where it is.
+    pub fn paste_text_to(&self, payload: &str, target: &ForegroundToken) -> Result<(), PasteError> {
         // See `Paster::sequence`: drop a concurrent request rather than
         // queueing it. A poisoned lock is recovered — the guard protects
         // `()`, so there is no state to be left inconsistent.
@@ -148,7 +167,7 @@ impl Paster {
         // move it from here is somebody else's.
         let seq_after_payload = self.clipboard.sequence();
         let outcome = match written {
-            Ok(()) => self.emit_paste(delay_ms),
+            Ok(()) => self.emit_paste(delay_ms, target),
             Err(e) => Err(PasteError::from(e)),
         };
 
@@ -236,14 +255,21 @@ impl Paster {
         }
     }
 
-    /// Wait out the settle delay and emit Ctrl+V. `Ok(false)` means there
-    /// was no device to emit through — a clean degrade, not an error.
-    fn emit_paste(&self, delay_ms: u64) -> Result<bool, PasteError> {
+    /// Give the target focus back, wait out the settle delay and emit
+    /// Ctrl+V. `Ok(false)` means there was no device to emit through — a
+    /// clean degrade, not an error.
+    fn emit_paste(&self, delay_ms: u64, target: &ForegroundToken) -> Result<bool, PasteError> {
         // Check for a device BEFORE the settle delay: with the null
         // backend the sleep buys nothing and only holds the sequence
         // guard (for up to 5s at the configured maximum).
         if !self.uinput.available() {
             return Ok(false);
+        }
+        // Focus first, so the settle delay below covers it too. Best
+        // effort: if the window is gone or the platform refuses, the
+        // paste still goes to whatever has focus, as it always did.
+        if target.raw().is_some() && !self.foreground.restore(target) {
+            tracing::warn!("could not give focus back to the target window");
         }
         if delay_ms > 0 {
             std::thread::sleep(Duration::from_millis(delay_ms));
@@ -257,7 +283,8 @@ impl Paster {
 mod tests {
     use super::*;
     use fastpaste_platform::{
-        Clipboard, ClipboardError, ClipboardPayload, NullClipboard, PasteMethod,
+        Clipboard, ClipboardError, ClipboardPayload, ForegroundToken, ForegroundWindow,
+        NullClipboard, PasteMethod,
     };
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -984,5 +1011,72 @@ mod tests {
         assert!(uinput.sent_at.lock().unwrap().is_empty(), "no keystroke");
         assert_eq!(clip.writes(), vec!["payload", "orig"]);
         assert_eq!(clip.text().unwrap(), "orig");
+    }
+
+    // ---- giving focus back to the target ---------------------------------
+
+    /// Records `restore` calls into a log it shares with the keystroke
+    /// fake, so a test can assert what happened in which order.
+    struct RecordingForeground {
+        log: Arc<Mutex<Vec<String>>>,
+        restore_ok: bool,
+    }
+
+    impl ForegroundWindow for RecordingForeground {
+        fn capture(&self) -> ForegroundToken {
+            ForegroundToken::from_raw(7)
+        }
+        fn restore(&self, token: &ForegroundToken) -> bool {
+            self.log
+                .lock()
+                .unwrap()
+                .push(format!("restore {:?}", token.raw()));
+            self.restore_ok
+        }
+    }
+
+    fn focus_fixture(restore_ok: bool) -> (Paster, Arc<Mutex<Vec<String>>>) {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let send_log = Arc::clone(&log);
+        let uinput = HookUinput::new(move || send_log.lock().unwrap().push("send".into()));
+        let foreground = Arc::new(RecordingForeground {
+            log: Arc::clone(&log),
+            restore_ok,
+        });
+        let paster = Paster::new(Arc::new(NullClipboard::new()), uinput, cfg(0, true))
+            .with_foreground(foreground);
+        (paster, log)
+    }
+
+    /// Finding 4. The keystroke used to go wherever focus happened to land
+    /// after the dialog hid. The window captured at hotkey time gets focus
+    /// back first, and only then is the chord sent.
+    #[test]
+    fn paster_restores_focus_before_emitting() {
+        let (paster, log) = focus_fixture(true);
+        paster
+            .paste_text_to("payload", &ForegroundToken::from_raw(7))
+            .unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["restore Some(7)", "send"]);
+    }
+
+    /// Restoring focus is best-effort: a window that is gone, or a
+    /// platform that refuses, still gets the paste attempted.
+    #[test]
+    fn a_failed_focus_restore_still_pastes() {
+        let (paster, log) = focus_fixture(false);
+        paster
+            .paste_text_to("payload", &ForegroundToken::from_raw(7))
+            .unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["restore Some(7)", "send"]);
+    }
+
+    /// Nothing captured (tray menu, main window, no backend): focus is
+    /// left alone.
+    #[test]
+    fn paste_text_without_a_target_leaves_focus_alone() {
+        let (paster, log) = focus_fixture(true);
+        paster.paste_text("payload").unwrap();
+        assert_eq!(*log.lock().unwrap(), vec!["send"]);
     }
 }

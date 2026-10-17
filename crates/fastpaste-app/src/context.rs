@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use fastpaste_data::Database;
 use fastpaste_platform::{
-    Clipboard, GlobalHotkey, NullGlobalHotkey, NullPasteKeys, PasteKeys, SystemClipboard,
-    SystemHotkeys, SystemPasteKeys,
+    Clipboard, ForegroundWindow, GlobalHotkey, NullForegroundWindow, NullGlobalHotkey,
+    NullPasteKeys, PasteKeys, SystemClipboard, SystemForeground, SystemHotkeys, SystemPasteKeys,
 };
 use single_instance::SingleInstance;
 
@@ -36,6 +36,9 @@ pub struct AppContext {
     pub clipboard: Arc<dyn Clipboard>,
     pub uinput: Arc<dyn PasteKeys>,
     pub hotkey: Arc<dyn GlobalHotkey>,
+    /// Captures the window a paste is meant for when the hotkey fires;
+    /// the paster restores through the same backend.
+    pub foreground: Arc<dyn ForegroundWindow>,
     /// Active application settings, behind an `RwLock` so the Options
     /// dialog's Apply can swap the whole struct at runtime. Accessors
     /// hand out clones — cheap (a handful of small strings) — so no caller
@@ -109,16 +112,20 @@ impl AppContext {
         clipboard: Arc<dyn Clipboard>,
         uinput: Arc<dyn PasteKeys>,
         hotkey: Arc<dyn GlobalHotkey>,
+        foreground: Arc<dyn ForegroundWindow>,
         settings: Settings,
         single_instance: Option<SingleInstance>,
         db_path: std::path::PathBuf,
         secret_store: Arc<dyn fastpaste_platform::SecretStore>,
     ) -> Self {
-        let paster = Arc::new(Paster::new(
-            clipboard.clone(),
-            uinput.clone(),
-            paste_config(&settings.paste),
-        ));
+        let paster = Arc::new(
+            Paster::new(
+                clipboard.clone(),
+                uinput.clone(),
+                paste_config(&settings.paste),
+            )
+            .with_foreground(foreground.clone()),
+        );
         let clipboard_history = Arc::new(ClipboardHistory::new(
             settings.clipboard_history.max_items as usize,
             settings.clipboard_history.enabled,
@@ -129,6 +136,7 @@ impl AppContext {
             clipboard,
             uinput,
             hotkey,
+            foreground,
             settings: RwLock::new(settings),
             clipboard_history,
             single_instance,
@@ -366,6 +374,16 @@ impl AppContext {
             }
         };
 
+        let foreground: Arc<dyn ForegroundWindow> = match SystemForeground::new() {
+            Ok(f) => Arc::new(f),
+            Err(e) => {
+                tracing::warn!(
+                    "{e}; pastes go to whatever window has focus once the dialog closes"
+                );
+                Arc::new(NullForegroundWindow)
+            }
+        };
+
         // `SystemSecretStore::new()` no longer probes eagerly (Task 6), so
         // this is cheap even for a plaintext database that never opts in —
         // no D-Bus round trip here. Availability is asked for only by the
@@ -394,6 +412,7 @@ impl AppContext {
             clipboard,
             uinput,
             hotkey,
+            foreground,
             settings,
             Some(single_instance),
             db_path,
@@ -441,7 +460,10 @@ impl AppContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fastpaste_platform::{NullClipboard, NullGlobalHotkey, NullPasteKeys};
+    use fastpaste_platform::{
+        ForegroundToken, ForegroundWindow, NullClipboard, NullForegroundWindow, NullGlobalHotkey,
+        NullPasteKeys, PasteKeyError, PasteKeys,
+    };
 
     fn ctx(settings: Settings) -> (tempfile::TempDir, AppContext) {
         let dir = tempfile::TempDir::new().unwrap();
@@ -454,6 +476,7 @@ mod tests {
             Arc::new(NullClipboard::new()),
             Arc::new(NullPasteKeys),
             Arc::new(NullGlobalHotkey::new()),
+            Arc::new(NullForegroundWindow),
             settings,
             None,
             db_path,
@@ -565,6 +588,7 @@ mod tests {
             clip.clone(),
             Arc::new(NullPasteKeys),
             Arc::new(NullGlobalHotkey::new()),
+            Arc::new(NullForegroundWindow),
             Settings::default(),
             None,
             db_path,
@@ -584,6 +608,56 @@ mod tests {
         ctx.set_settings(s);
         ctx.paster.paste_text("second").unwrap();
         assert_eq!(clip.text().unwrap(), "second");
+    }
+
+    /// The GUI captures through `ctx.foreground` and the paster restores
+    /// through its own handle; they must be the same backend, or the
+    /// captured token is handed to something that cannot use it.
+    #[test]
+    fn the_paster_restores_through_the_context_foreground() {
+        struct Keys;
+        impl PasteKeys for Keys {
+            fn available(&self) -> bool {
+                true
+            }
+            fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
+                Ok(())
+            }
+        }
+        #[derive(Default)]
+        struct Fg(Mutex<Vec<Option<u64>>>);
+        impl ForegroundWindow for Fg {
+            fn capture(&self) -> ForegroundToken {
+                ForegroundToken::from_raw(9)
+            }
+            fn restore(&self, token: &ForegroundToken) -> bool {
+                self.0.lock().unwrap().push(token.raw());
+                true
+            }
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("t.sqlite");
+        let db = Arc::new(Mutex::new(Database::open(&db_path, false).unwrap()));
+        let fg = Arc::new(Fg::default());
+        let mut settings = Settings::default();
+        settings.paste.delay_ms = 0;
+        settings.paste.restore_delay_ms = 0;
+        let ctx = AppContext::new(
+            db,
+            Arc::new(NullClipboard::new()),
+            Arc::new(Keys),
+            Arc::new(NullGlobalHotkey::new()),
+            fg.clone(),
+            settings,
+            None,
+            db_path,
+            Arc::new(fastpaste_platform::NullSecretStore::new()),
+        );
+
+        let target = ctx.foreground.capture();
+        ctx.paster.paste_text_to("payload", &target).unwrap();
+        assert_eq!(*fg.0.lock().unwrap(), vec![Some(9)]);
     }
 
     #[test]
@@ -635,6 +709,7 @@ mod tests {
             Arc::new(NullClipboard::new()),
             Arc::new(NullPasteKeys),
             Arc::new(NullGlobalHotkey::new()),
+            Arc::new(NullForegroundWindow),
             Settings::default(),
             None,
             path.clone(),

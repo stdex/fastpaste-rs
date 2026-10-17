@@ -33,7 +33,9 @@ use std::sync::{Arc, Mutex};
 
 use fastpaste_app::{AppContext, Settings};
 use fastpaste_data::{EncryptionState, Item, ItemKind};
-use fastpaste_platform::{GlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID, SecretStore as _};
+use fastpaste_platform::{
+    ForegroundToken, GlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID, SecretStore as _,
+};
 
 // `Model` trait is in scope so we can call `.row_data()` on a `ModelRc` in
 // `selected_row_id` / `current_parent_id`.
@@ -305,7 +307,10 @@ fn start_app(ctx: Arc<AppContext>) -> anyhow::Result<()> {
                 let task: Box<dyn FnOnce() + Send + 'static> = match id {
                     OPEN_DIALOG_ID => {
                         let ctx = ctx_for_dialog.clone();
-                        Box::new(move || show_dialog_and_paste(ctx))
+                        // Now, before the dialog takes focus: this is the
+                        // window the user was typing into.
+                        let target = ctx.foreground.capture();
+                        Box::new(move || show_dialog_and_paste(ctx, target))
                     }
                     OPEN_MAIN_WINDOW_ID => {
                         let ctx = ctx_for_main.clone();
@@ -621,7 +626,10 @@ fn build_tray_icon(ctx: &Arc<AppContext>) -> anyhow::Result<FastpasteTray> {
     let ctx_dialog = ctx.clone();
     tray.on_open_selection_dialog(move || {
         let ctx = ctx_dialog.clone();
-        let _ = slint::invoke_from_event_loop(move || show_dialog_and_paste(ctx));
+        // No target: from the tray, the window with focus is the panel.
+        let _ = slint::invoke_from_event_loop(move || {
+            show_dialog_and_paste(ctx, ForegroundToken::default())
+        });
     });
 
     // "Options..." → show Options Dialog.
@@ -1079,7 +1087,7 @@ fn build_main_window(ctx: Arc<AppContext>) -> Option<MainWindow> {
                 return;
             };
             let _ = w.hide();
-            spawn_paste(&ctx_clone, text);
+            spawn_paste(&ctx_clone, text, ForegroundToken::default());
         });
     }
 
@@ -1345,16 +1353,17 @@ fn activated_row_text(win: &MainWindow, ctx: &AppContext) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
-/// Paste `text` on a worker thread.
+/// Paste `text` on a worker thread, into the window `target` captured
+/// (an empty token pastes wherever focus is).
 ///
 /// Never on the event loop: the paste sequence sleeps for the configured
 /// settle delay and then blocks on `/dev/uinput`.
-fn spawn_paste(ctx: &Arc<AppContext>, text: String) {
+fn spawn_paste(ctx: &Arc<AppContext>, text: String, target: ForegroundToken) {
     let paster = ctx.paster.clone();
     if let Err(e) = std::thread::Builder::new()
         .name("paste-worker".into())
         .spawn(move || {
-            if let Err(e) = paster.paste_text(&text) {
+            if let Err(e) = paster.paste_text_to(&text, &target) {
                 tracing::error!("paste failed: {e}");
             }
         })
@@ -1466,8 +1475,13 @@ fn parent_for_new_item(row: &TreeItem) -> i64 {
 
 /// Build and show the SelectionDialog — or repopulate the existing one if
 /// it is still alive (repeated hotkey presses must not stack dialogs).
-/// Must be called on the Slint event-loop thread.
-fn show_dialog_and_paste(ctx: Arc<AppContext>) {
+/// A pick pastes into `target`, the window captured when the dialog was
+/// asked for. Must be called on the Slint event-loop thread.
+fn show_dialog_and_paste(ctx: Arc<AppContext>, target: ForegroundToken) {
+    // Every invocation brings its own target, so it is stored rather than
+    // captured by the paste callback: the singleton dialog outlives it.
+    ui_state::set_dialog_target(target);
+
     // Singleton: if one is already alive, refresh its contents.
     if let Some(d) = live(&SELECTION_DIALOG) {
         d.set_filter_text("".into());
@@ -1671,7 +1685,7 @@ fn repopulate_selection_dialog(d: &SelectionDialog, ctx: &Arc<AppContext>) {
             d.hide().ok();
         }
         if let Some(text) = text {
-            spawn_paste(&ctx_paste, text);
+            spawn_paste(&ctx_paste, text, ui_state::dialog_target());
         }
     });
 }
