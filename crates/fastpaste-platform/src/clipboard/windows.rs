@@ -22,8 +22,8 @@ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::DataExchange::AddClipboardFormatListener;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetMessageW, HWND_MESSAGE, MSG, RegisterClassW,
-    WM_CLIPBOARDUPDATE, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, HWND_MESSAGE,
+    MSG, RegisterClassW, TranslateMessage, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
 use super::{Clipboard, ClipboardError, ClipboardPayload, SuppressList};
@@ -259,9 +259,14 @@ fn listener_loop(
     // SAFETY: `msg` is a live, initialised MSG owned by this frame; the
     // null window filter means "any window of this thread".
     while unsafe { GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) } > 0 {
-        // Nothing to translate or dispatch beyond the window procedure,
-        // which the OS calls directly for WM_CLIPBOARDUPDATE.
-        unsafe { DefWindowProcW(msg.hwnd, msg.message, msg.wParam, msg.lParam) };
+        // WM_CLIPBOARDUPDATE is *posted*: it comes back from GetMessageW
+        // and reaches `wnd_proc` only through DispatchMessageW. Handing it
+        // to DefWindowProcW here instead dropped every notification, so
+        // history on Windows never saw a single copy.
+        unsafe {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
 
     // SAFETY: tearing down what this function created, in order.
