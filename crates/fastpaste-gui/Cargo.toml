@@ -21,6 +21,16 @@ sys-locale.workspace = true
 fastpaste-data = { path = "../fastpaste-data" }
 secrecy.workspace = true
 
+# The window backend, per platform. Linux gets Wayland only: the app
+# targets Wayland sessions (see the README), and leaving X11 out drops the
+# libX11 family winit would otherwise dlopen. The global hotkeys are not
+# affected — they reach XWayland through x11rb, which links nothing.
+[target.'cfg(target_os = "linux")'.dependencies]
+slint = { workspace = true, features = ["backend-winit-wayland"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+slint = { workspace = true, features = ["backend-winit"] }
+
 [dev-dependencies]
 chrono.workspace = true
 fluent-syntax.workspace = true

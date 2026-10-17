@@ -105,6 +105,7 @@ The app starts and stays useful when a piece of the desktop is missing:
 |---|---|
 | `/dev/uinput` | Paste puts the payload on the clipboard and leaves it there for a manual Ctrl+V; nothing else changes |
 | Synthetic input reaching the target (Windows: an elevated window refuses it, under UIPI) | Same as above: the payload is left on the clipboard for a manual paste, instead of the old clipboard being put back |
+| A Wayland session (Linux) | No window opens at all: the GUI is built with Slint's Wayland backend only, so an X11 session — already unsupported — fails at startup instead of half-working |
 | An X11 window with focus when the hotkey fires (Linux) | No target window is captured, so the paste goes to whichever window the compositor focuses once the dialog closes. See the Linux paste notes below |
 | XWayland / X connection | Global hotkeys do not fire at all (as opposed to firing only over X11 windows — see the limitation at the top). The tray, main window and clipboard history all still work. A connection that drops later is reconnected automatically (up to 5 attempts, 500 ms apart), replaying the registered grabs; past that the hotkeys are inert until the app is restarted |
 | System tray | The app quits when the main window is closed, rather than staying resident with no way to reach it |

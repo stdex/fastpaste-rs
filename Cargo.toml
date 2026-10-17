@@ -20,9 +20,19 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
 anyhow = "1"
-slint = "1.17"
+# No default features: the window backend is picked per platform in
+# fastpaste-gui (Wayland-only on Linux), and a default `backend-winit`
+# here would bring X11 back through feature unification.
+slint = { version = "1.17", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-femtovg",
+    "renderer-software",
+    "accessibility",
+    "system-tray",
+] }
 slint-build = "1.17"
-slint-tree-view = "0.3.0"
+slint-tree-view = "0.3.1"
 fluent-templates = "0.15"
 fluent-syntax = "0.12"
 sys-locale = "0.3"

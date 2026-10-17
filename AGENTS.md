@@ -35,6 +35,15 @@ Backends live in submodules (`hotkey/x11.rs`, `hotkey/windows.rs`,
 `clipboard/wayland.rs`, `clipboard/windows.rs`) and the shared file
 above them holds only the trait, the error type and the null backend.
 
+Slint's window backend is chosen the same way: the workspace `slint`
+dependency has `default-features = false`, and `fastpaste-gui` adds
+`backend-winit-wayland` on Linux and `backend-winit` elsewhere. Leaving
+X11 out on Linux drops the libX11 family winit would otherwise dlopen.
+Cargo features only ever add up, so **any** crate in the tree depending
+on `slint` with default features brings X11 back — a widget library such
+as `slint-tree-view` must depend on it with `default-features = false`.
+Check with `cargo tree -p fastpaste-gui -e features -i i-slint-backend-winit`.
+
 Platform-specific dependencies belong in a target section of
 `Cargo.toml`, never the common one — `evdev`, `x11rb` and
 `wl-clipboard-watch` do not exist on Windows, and `arboard` needs its
