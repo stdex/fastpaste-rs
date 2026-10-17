@@ -9,7 +9,7 @@
 
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, IsWindow, SetForegroundWindow,
+    GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
 };
 
 use super::{ForegroundError, ForegroundToken, ForegroundWindow};
@@ -24,14 +24,23 @@ impl WindowsForeground {
     }
 }
 
+/// The process and thread that own `hwnd`, as one number, or `None` if
+/// it names no window.
+fn owner_of(hwnd: HWND) -> Option<u64> {
+    let mut pid = 0u32;
+    // SAFETY: any HWND value is accepted (an invalid one returns 0), and
+    // `pid` is a live u32 owned by this frame.
+    let tid = unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+    (tid != 0).then(|| (u64::from(pid) << 32) | u64::from(tid))
+}
+
 impl ForegroundWindow for WindowsForeground {
     fn capture(&self) -> ForegroundToken {
         // SAFETY: no arguments, no preconditions.
         let hwnd = unsafe { GetForegroundWindow() };
-        if hwnd.is_null() {
-            ForegroundToken::default()
-        } else {
-            ForegroundToken::from_raw(hwnd as usize as u64)
+        match owner_of(hwnd) {
+            Some(owner) => ForegroundToken::with_owner(hwnd as usize as u64, owner),
+            None => ForegroundToken::default(),
         }
     }
 
@@ -40,12 +49,14 @@ impl ForegroundWindow for WindowsForeground {
             return false;
         };
         let hwnd = raw as usize as HWND;
-        // SAFETY: IsWindow accepts any value and only reports whether it
-        // names a live window; the other two are only reached with one.
+        // A closed window's handle can be recycled for an unrelated one;
+        // focusing that would paste into the wrong application.
+        if !token.still_owned(owner_of(hwnd)) {
+            return false;
+        }
+        // SAFETY: both take any HWND; this one names a live window owned
+        // by the thread that owned it at capture.
         unsafe {
-            if IsWindow(hwnd) == 0 {
-                return false;
-            }
             if GetForegroundWindow() == hwnd {
                 return true;
             }
