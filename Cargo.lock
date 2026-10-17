@@ -1504,7 +1504,7 @@ checksum = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
 
 [[package]]
 name = "fastpaste-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "fastpaste-data"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "refinery",
@@ -1537,7 +1537,7 @@ dependencies = [
 
 [[package]]
 name = "fastpaste-gui"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1559,7 +1559,7 @@ dependencies = [
 
 [[package]]
 name = "fastpaste-platform"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "arboard",
  "clipboard-win",

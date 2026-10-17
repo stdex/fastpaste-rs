@@ -11,6 +11,8 @@ README).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-10-18
+
 First release.
 
 ### Added

@@ -12,7 +12,7 @@ members = [
 # Windows version resource take it from here, and the release workflow
 # refuses a `vX.Y.Z` tag that does not match it. See "Releasing" in the
 # README.
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"

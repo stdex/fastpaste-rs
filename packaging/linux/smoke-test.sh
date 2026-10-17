@@ -7,12 +7,12 @@
 #   smoke-test.sh DIR VERSION
 #
 # DIR holds the .deb and the .rpm; the one this distribution installs is
-# picked by its package manager. VERSION is the Cargo version (0.1.0).
+# picked by its package manager. VERSION is the Cargo version (1.0.0).
 #
 # The release workflow runs it on each supported distribution. By hand:
 #
 #   docker run --rm -v "$PWD:/src:ro" -w /src ubuntu:22.04 \
-#       sh packaging/linux/smoke-test.sh target/debian 0.1.0
+#       sh packaging/linux/smoke-test.sh target/debian 1.0.0
 #
 # It cannot show a window — that needs a Wayland session — so the GUI
 # itself is covered by --version and the library checks only.
