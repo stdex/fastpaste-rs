@@ -193,15 +193,24 @@ mod paste_method_format {
         s.serialize_str(name(*method))
     }
 
+    /// Whatever the file holds there: a name, or anything else at all.
+    /// Taking any value is what keeps a bad one from failing the file.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Name(String),
+        Other(serde::de::IgnoredAny),
+    }
+
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PasteMethod, D::Error> {
-        let raw = String::deserialize(d)?;
-        Ok(PasteMethod::ALL
-            .into_iter()
-            .find(|m| name(*m) == raw)
-            .unwrap_or_else(|| {
-                tracing::warn!("paste.method {raw:?} is not known; using the default");
-                PasteMethod::default()
-            }))
+        let known = match Raw::deserialize(d)? {
+            Raw::Name(raw) => PasteMethod::ALL.into_iter().find(|m| name(*m) == raw),
+            Raw::Other(_) => None,
+        };
+        Ok(known.unwrap_or_else(|| {
+            tracing::warn!("paste.method is not a known method; using the default");
+            PasteMethod::default()
+        }))
     }
 }
 
@@ -244,8 +253,25 @@ pub const MAX_ITEMS_RANGE: std::ops::RangeInclusive<u32> = 1..=500;
 /// wedging the paste worker thread for what looks like forever.
 pub const DELAY_MS_RANGE: std::ops::RangeInclusive<u64> = 0..=5_000;
 
-/// Accepted range for `paste.restore_delay_ms`, bounded for the same reason.
-pub const RESTORE_DELAY_MS_RANGE: std::ops::RangeInclusive<u64> = 0..=5_000;
+/// Accepted range for `paste.restore_delay_ms`: the same bound, for the
+/// same reason.
+pub const RESTORE_DELAY_MS_RANGE: std::ops::RangeInclusive<u64> = DELAY_MS_RANGE;
+
+/// Clamp `value` into `range`, logging when it had to move. Returns
+/// whether it did.
+fn clamp_into<T: Ord + Copy + std::fmt::Debug>(
+    name: &str,
+    value: &mut T,
+    range: &std::ops::RangeInclusive<T>,
+) -> bool {
+    let clamped = (*value).clamp(*range.start(), *range.end());
+    if clamped == *value {
+        return false;
+    }
+    tracing::warn!("{name} {value:?} out of range {range:?}; using {clamped:?}");
+    *value = clamped;
+    true
+}
 
 impl Settings {
     /// Where the config file lives. Resolved via the shared [`crate::paths`]
@@ -263,44 +289,17 @@ impl Settings {
     /// arrives, and it should not be the only thing standing between a
     /// typo and a failed allocation.
     pub fn clamp(&mut self) {
-        let max_items = self
-            .clipboard_history
-            .max_items
-            .clamp(*MAX_ITEMS_RANGE.start(), *MAX_ITEMS_RANGE.end());
-        if max_items != self.clipboard_history.max_items {
-            tracing::warn!(
-                "clipboard_history.max_items {} out of range {:?}; using {max_items}",
-                self.clipboard_history.max_items,
-                MAX_ITEMS_RANGE,
-            );
-            self.clipboard_history.max_items = max_items;
-        }
-
-        let delay_ms = self
-            .paste
-            .delay_ms
-            .clamp(*DELAY_MS_RANGE.start(), *DELAY_MS_RANGE.end());
-        if delay_ms != self.paste.delay_ms {
-            tracing::warn!(
-                "paste.delay_ms {} out of range {:?}; using {delay_ms}",
-                self.paste.delay_ms,
-                DELAY_MS_RANGE,
-            );
-            self.paste.delay_ms = delay_ms;
-        }
-
-        let restore_delay_ms = self.paste.restore_delay_ms.clamp(
-            *RESTORE_DELAY_MS_RANGE.start(),
-            *RESTORE_DELAY_MS_RANGE.end(),
+        clamp_into(
+            "clipboard_history.max_items",
+            &mut self.clipboard_history.max_items,
+            &MAX_ITEMS_RANGE,
         );
-        if restore_delay_ms != self.paste.restore_delay_ms {
-            tracing::warn!(
-                "paste.restore_delay_ms {} out of range {:?}; using {restore_delay_ms}",
-                self.paste.restore_delay_ms,
-                RESTORE_DELAY_MS_RANGE,
-            );
-            self.paste.restore_delay_ms = restore_delay_ms;
-        }
+        clamp_into("paste.delay_ms", &mut self.paste.delay_ms, &DELAY_MS_RANGE);
+        clamp_into(
+            "paste.restore_delay_ms",
+            &mut self.paste.restore_delay_ms,
+            &RESTORE_DELAY_MS_RANGE,
+        );
     }
 
     /// Load settings from disk. If the file does not exist, returns
@@ -573,6 +572,27 @@ mod tests {
         );
     }
 
+    /// Not even a string — a hand edit like `method = 1` — must not fail
+    /// the file either.
+    #[test]
+    fn a_non_string_paste_method_falls_back_without_losing_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        for value in ["1", "true", "[\"shift_insert\"]"] {
+            std::fs::write(
+                &path,
+                format!(
+                    "[general]\nlanguage = \"ru\"\n\n[paste]\nmethod = {value}\ndelay_ms = 90\n"
+                ),
+            )
+            .unwrap();
+            let loaded = Settings::load_from(&path).unwrap();
+            assert_eq!(loaded.paste.method, PasteMethod::CtrlV, "method = {value}");
+            assert_eq!(loaded.paste.delay_ms, 90, "method = {value}");
+            assert_eq!(loaded.general.language, "ru", "method = {value}");
+        }
+    }
+
     /// A `[paste]` section written before `restore_delay_ms` existed keeps
     /// its own values and takes the default for the new one.
     #[test]
@@ -645,6 +665,20 @@ mod tests {
         assert_eq!(loaded.clipboard_history.max_items, *MAX_ITEMS_RANGE.end());
         assert_eq!(loaded.paste.delay_ms, *DELAY_MS_RANGE.end());
         assert_eq!(loaded.paste.restore_delay_ms, *RESTORE_DELAY_MS_RANGE.end());
+    }
+
+    #[test]
+    fn clamp_into_moves_only_out_of_range_values() {
+        let range = 10u64..=20;
+        let mut v = 15;
+        assert!(!clamp_into("t.v", &mut v, &range));
+        assert_eq!(v, 15);
+        let mut low = 3;
+        assert!(clamp_into("t.v", &mut low, &range));
+        assert_eq!(low, 10);
+        let mut high = 99;
+        assert!(clamp_into("t.v", &mut high, &range));
+        assert_eq!(high, 20);
     }
 
     #[test]
