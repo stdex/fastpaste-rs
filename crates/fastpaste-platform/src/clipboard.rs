@@ -115,42 +115,91 @@ fn unrepresentable(has_other_formats: Option<bool>) -> ClipboardSnapshot {
     }
 }
 
-/// Snapshot through arboard: text first (the common case, and the one
-/// history deals in), then an image, then a file list, and only then ask
-/// the backend whether anything else is on offer.
+/// One step of a snapshot: the content was there and read, was not
+/// there, or was there and could not be read.
+enum Read<T> {
+    Got(T),
+    Absent,
+    Failed(String),
+}
+
+impl<T> Read<T> {
+    #[cfg(any(target_os = "linux", windows))]
+    fn map<U>(self, f: impl FnOnce(T) -> U) -> Read<U> {
+        match self {
+            Read::Got(value) => Read::Got(f(value)),
+            Read::Absent => Read::Absent,
+            Read::Failed(e) => Read::Failed(e),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", windows))]
+impl<T> Read<T> {
+    fn from_arboard(result: Result<T, arboard::Error>) -> Self {
+        match result {
+            Ok(value) => Read::Got(value),
+            Err(arboard::Error::ContentNotAvailable) => Read::Absent,
+            Err(e) => Read::Failed(e.to_string()),
+        }
+    }
+}
+
+/// Read the clipboard as the first of a file list, text or an image that
+/// is there, and only then ask the backend whether anything else is on
+/// offer. Each reader runs only if the ones before it found nothing.
+///
+/// Files come first: file managers offer the copied paths as text as
+/// well, and restoring that text turns a file copy into a string.
+fn snapshot_in_order(
+    files: impl FnOnce() -> Read<Vec<PathBuf>>,
+    text: impl FnOnce() -> Read<String>,
+    image: impl FnOnce() -> Read<ImageSnapshot>,
+    has_other_formats: impl FnOnce() -> Option<bool>,
+) -> ClipboardSnapshot {
+    // A real read error means something is there that we failed to save.
+    fn failed(what: &str, e: String) -> ClipboardSnapshot {
+        tracing::warn!("could not read the clipboard's {what}: {e}");
+        ClipboardSnapshot::Unsupported
+    }
+
+    match files() {
+        Read::Got(files) if !files.is_empty() => return ClipboardSnapshot::Files(files),
+        Read::Got(_) | Read::Absent => {}
+        Read::Failed(e) => return failed("file list", e),
+    }
+    match text() {
+        Read::Got(text) => return ClipboardSnapshot::Text(text),
+        Read::Absent => {}
+        Read::Failed(e) => return failed("text", e),
+    }
+    match image() {
+        Read::Got(image) => return ClipboardSnapshot::Image(image),
+        Read::Absent => {}
+        Read::Failed(e) => return failed("image", e),
+    }
+    unrepresentable(has_other_formats())
+}
+
+/// [`snapshot_in_order`] with every read through arboard.
 #[cfg(any(target_os = "linux", windows))]
 fn arboard_snapshot(
     clip: &mut arboard::Clipboard,
     has_other_formats: impl FnOnce() -> Option<bool>,
 ) -> ClipboardSnapshot {
-    // A real read error means something is there that we failed to save.
-    fn failed(what: &str, e: arboard::Error) -> ClipboardSnapshot {
-        tracing::warn!("could not read the clipboard's {what}: {e}");
-        ClipboardSnapshot::Unsupported
-    }
-
-    match clip.get_text() {
-        Ok(text) => return ClipboardSnapshot::Text(text),
-        Err(arboard::Error::ContentNotAvailable) => {}
-        Err(e) => return failed("text", e),
-    }
-    match clip.get_image() {
-        Ok(image) => {
-            return ClipboardSnapshot::Image(ImageSnapshot {
+    let clip = std::cell::RefCell::new(clip);
+    snapshot_in_order(
+        || Read::from_arboard(clip.borrow_mut().get().file_list()),
+        || Read::from_arboard(clip.borrow_mut().get_text()),
+        || {
+            Read::from_arboard(clip.borrow_mut().get_image()).map(|image| ImageSnapshot {
                 width: image.width,
                 height: image.height,
                 rgba: image.bytes.into_owned(),
-            });
-        }
-        Err(arboard::Error::ContentNotAvailable) => {}
-        Err(e) => return failed("image", e),
-    }
-    match clip.get().file_list() {
-        Ok(files) if !files.is_empty() => return ClipboardSnapshot::Files(files),
-        Ok(_) | Err(arboard::Error::ContentNotAvailable) => {}
-        Err(e) => return failed("file list", e),
-    }
-    unrepresentable(has_other_formats())
+            })
+        },
+        has_other_formats,
+    )
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -462,6 +511,73 @@ mod tests {
         // Cannot tell (no way to list formats here): as before this
         // existed, treat it as empty.
         assert_eq!(unrepresentable(None), ClipboardSnapshot::Empty);
+    }
+
+    // ---- snapshot order -------------------------------------------------
+
+    fn path(p: &str) -> PathBuf {
+        PathBuf::from(p)
+    }
+
+    /// File managers offer the copied paths as text too. Reading the text
+    /// first restored a file copy as a string — pasting in the file
+    /// manager afterwards pasted nothing.
+    #[test]
+    fn files_are_snapshotted_before_their_text() {
+        let snap = snapshot_in_order(
+            || Read::Got(vec![path("/home/u/a.txt")]),
+            || Read::Got("/home/u/a.txt".into()),
+            || Read::Absent,
+            || Some(true),
+        );
+        assert_eq!(snap, ClipboardSnapshot::Files(vec![path("/home/u/a.txt")]));
+    }
+
+    /// A uri-list holding only web links reads as no files at all.
+    #[test]
+    fn an_empty_file_list_falls_through_to_text() {
+        let snap = snapshot_in_order(
+            || Read::Got(vec![]),
+            || Read::Got("https://example.org".into()),
+            || Read::Absent,
+            || Some(true),
+        );
+        assert_eq!(snap, ClipboardSnapshot::Text("https://example.org".into()));
+    }
+
+    /// Once something is found nothing later is read — each read is a
+    /// clipboard round trip.
+    #[test]
+    fn the_first_hit_stops_the_chain() {
+        let snap = snapshot_in_order(
+            || Read::Absent,
+            || Read::Got("t".into()),
+            || panic!("the image must not be read"),
+            || panic!("formats must not be listed"),
+        );
+        assert_eq!(snap, ClipboardSnapshot::Text("t".into()));
+    }
+
+    #[test]
+    fn a_failed_read_is_unsupported() {
+        let snap = snapshot_in_order(
+            || Read::Failed("locked".into()),
+            || panic!("not reached"),
+            || panic!("not reached"),
+            || panic!("not reached"),
+        );
+        assert_eq!(snap, ClipboardSnapshot::Unsupported);
+    }
+
+    #[test]
+    fn nothing_readable_falls_back_to_the_format_listing() {
+        let snap = snapshot_in_order(
+            || Read::Absent,
+            || Read::Absent,
+            || Read::Absent,
+            || Some(true),
+        );
+        assert_eq!(snap, ClipboardSnapshot::Unsupported);
     }
 
     #[test]
