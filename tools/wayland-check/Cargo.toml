@@ -1,0 +1,14 @@
+[package]
+name = "wayland-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Drives fastpaste's real Linux clipboard against a headless KWin. See README.md."
+
+# Not a member of the root workspace: it needs a compositor to run, and
+# refuses to touch the desktop session it is started from.
+[workspace]
+
+[dependencies]
+fastpaste-platform = { path = "../../crates/fastpaste-platform" }
+arboard = { version = "3.6", features = ["wayland-data-control"] }

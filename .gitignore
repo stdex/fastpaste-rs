@@ -1,5 +1,9 @@
 # Rust build artifacts.
 /target/
+# The tools/ programs are their own workspaces: built against a copy of the
+# root lockfile, ideally into the root target/ (see their READMEs).
+/tools/*/target/
+/tools/*/Cargo.lock
 **/*.rs.bk
 
 # Editor / IDE scratch files.

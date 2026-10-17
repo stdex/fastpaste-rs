@@ -1,0 +1,25 @@
+[package]
+name = "wine-check"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Drives fastpaste's real Windows paste path under Wine. See README.md."
+
+# Not a member of the root workspace: it builds only for
+# x86_64-pc-windows-gnu, and the workspace gate (test/clippy) is Linux.
+[workspace]
+
+[dependencies]
+fastpaste-platform = { path = "../../crates/fastpaste-platform" }
+fastpaste-app = { path = "../../crates/fastpaste-app" }
+arboard = "3.6"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

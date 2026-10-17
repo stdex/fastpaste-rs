@@ -75,21 +75,23 @@ env -u DISPLAY -u WAYLAND_DISPLAY wine target/x86_64-pc-windows-gnu/debug/deps/f
 
 That runs the `#[cfg(windows)]` unit tests.
 
-The Wayland clipboard can be exercised the same way without touching the
-desktop you are working in: a headless KWin on its own socket and its own
-D-Bus session,
+Two small programs in `tools/` go further and drive the real backends
+end to end; each README has the exact commands.
 
-```
-dbus-run-session -- kwin_wayland --virtual --socket fp-test &
-WAYLAND_DISPLAY=fp-test cargo run ...
-```
+- **`tools/wine-check`** runs the real `Paster` under Wine, pasting into
+  an EDIT control and reporting what arrived: snippet vs. old clipboard,
+  focus, scan codes, held modifiers, non-text clipboards, Shift+Insert.
+  The paste-sequence findings in the history were measured with it. Wine
+  is not Windows: it has no integrity levels (so no UIPI), and two
+  clipboard instances in one process can close each other's sessions.
+- **`tools/wayland-check`** runs the Linux clipboard snapshot/restore
+  against a headless KWin on its own socket and its own D-Bus session
+  (`dbus-run-session -- kwin_wayland --virtual --socket fp-test`), so it
+  has a data-control protocol and a clipboard of its own and never
+  touches the desktop you are working in.
 
-has a data-control protocol and a clipboard of its own. A small program linking
-`fastpaste-app` can also drive the real `Paster` into an EDIT control
-and observe what arrives — which is how the paste-sequence findings in
-the history were measured. Wine is not Windows: it has no integrity
-levels (so no UIPI), and two clipboard handles in one process can close
-each other's sessions there.
+Neither is a workspace member: they are built separately, into the root
+`target/`, against a copy of the root lockfile.
 
 ## Everyday commands
 
