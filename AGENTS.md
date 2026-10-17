@@ -48,16 +48,37 @@ cargo check --target x86_64-pc-windows-gnu -p fastpaste-platform
 ```
 
 That covers the crate where the platform code lives, and it is worth
-running for any change to it. The rest of the workspace **cannot** be
-checked this way without a C cross-compiler and a working OpenSSL
-build: `rusqlite`'s `bundled-sqlcipher-vendored-openssl` feature builds
-both SQLite and OpenSSL from source, so `-p fastpaste-data` and
-anything downstream needs mingw (`x86_64-w64-mingw32-gcc`) plus perl
-and NASM.
+running for any change to it. The rest of the workspace needs a C
+cross-compiler: `rusqlite`'s `bundled-sqlcipher-vendored-openssl`
+feature builds both SQLite and OpenSSL from source. With mingw
+(`x86_64-w64-mingw32-gcc`) and perl installed that works — NASM is
+*not* needed for the `-gnu` target — and takes a couple of minutes the
+first time:
 
-In practice, do not try. The `windows` job in `.github/workflows/ci.yml`
-builds and tests the whole workspace on a real Windows runner, and that
-is the check that counts. Nothing Windows can be *run* here at all.
+```
+cargo check --target x86_64-pc-windows-gnu -p fastpaste-gui
+```
+
+The `windows` job in `.github/workflows/ci.yml` builds and tests the
+whole workspace on a real Windows runner, and that is the check that
+counts. But Windows code *can* be run here, under Wine 10 with a null
+graphics driver (no window on screen, no syncing with the host
+clipboard):
+
+```
+export WINEPREFIX=/path/to/a/scratch/prefix
+env -u DISPLAY -u WAYLAND_DISPLAY wineboot -i
+env -u DISPLAY -u WAYLAND_DISPLAY wine reg add 'HKCU\Software\Wine\Drivers' /v Graphics /t REG_SZ /d null /f
+cargo test --target x86_64-pc-windows-gnu -p fastpaste-platform --lib --no-run
+env -u DISPLAY -u WAYLAND_DISPLAY wine target/x86_64-pc-windows-gnu/debug/deps/fastpaste_platform-*.exe
+```
+
+That runs the `#[cfg(windows)]` unit tests. A small program linking
+`fastpaste-app` can also drive the real `Paster` into an EDIT control
+and observe what arrives — which is how the paste-sequence findings in
+the history were measured. Wine is not Windows: it has no integrity
+levels (so no UIPI), and two clipboard handles in one process can close
+each other's sessions there.
 
 ## Everyday commands
 
@@ -312,6 +333,33 @@ device.
   next real copies; the polling fallback can miss a set→restore round
   trip entirely.
 - `VirtualDevice::emit` appends its own `SYN_REPORT`. Do not add one.
+- **The paste chord comes from a pure builder.** `windows_paste_inputs`
+  (compiled and tested on every platform, scan-code lookup injected) and
+  `paste_frames` are the only places a chord is spelled out; the uinput
+  device declares exactly `DEVICE_KEYS`, and a test checks every
+  method's frames against it — a key outside that set is silently
+  dropped by the kernel.
+- **Windows strokes carry the VK *and* the scan code,** without
+  `KEYEVENTF_SCANCODE`, as the reference implementation does: apps keep
+  matching the VK, RDP and raw-input readers get a real scan code
+  (`wScan = 0` reads as no key to them). Right Ctrl/Alt, both Win keys
+  and Insert need `KEYEVENTF_EXTENDEDKEY`, or they name a different key.
+- **Held modifiers are released first on Windows, never re-pressed.** A
+  held modifier the chord uses is left alone rather than pressed and
+  released, or Windows ends up thinking a key the user is holding is up.
+  A held Alt or Win gets an unassigned key (VK 0xE8) tapped before its
+  release, or the release is a "tap" that opens the menu bar / Start
+  menu. uinput cannot see host key state, so Linux does none of this.
+- **Restore waits after the keystroke.** `SendInput` and uinput only
+  queue it; restoring straight away made the target paste the old
+  clipboard. `restore_delay_ms` is that wait, and the restore is skipped
+  when `Clipboard::sequence` (or, without one, the contents) shows
+  someone else wrote the clipboard meanwhile.
+- **arboard's Windows file-list setter does not empty the clipboard,**
+  unlike its text and image setters. Restoring a file list clears first.
+- **`WM_CLIPBOARDUPDATE` is posted, not sent.** The listener's pump must
+  `DispatchMessageW`; handing it to `DefWindowProcW` drops every
+  notification.
 
 ### Two shortcuts should differ by key, not by modifier
 
@@ -346,9 +394,10 @@ The defaults are `Ctrl+Alt+V` / `Ctrl+Alt+M` for that reason.
 highest-severity bugs in this repo all lived inside closures or behind
 an X connection where no test could reach them. The seams that exist now
 (`match_registration`, `combos_to_retire`, `poll_outcome`,
-`drain_wake_from`, `ctrl_v_frames`, `index_of_id`, `parent_for_new_item`,
-`subtree_folder_ids`) were each carved out of something untestable, and
-each pins a real defect.
+`drain_wake_from`, `paste_frames`, `windows_paste_inputs`,
+`token_for_focus`, `unrepresentable`, `index_of_id`,
+`parent_for_new_item`, `subtree_folder_ids`) were each carved out of
+something untestable, and each pins a real defect.
 
 Write the test so it **fails against the old code**. Several tests here
 were rewritten after review because they passed either way: one computed

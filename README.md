@@ -4,14 +4,15 @@ Clipboard history + snippet manager, written in Rust. One codebase,
 built for Linux (Wayland — KDE Plasma 6 / KWin; X11 sessions are not
 supported) and for Windows.
 
-Everything the OS is asked for sits behind three traits, and each
-platform supplies one implementation:
+Everything the OS is asked for sits behind a trait, and each platform
+supplies one implementation:
 
 | | Linux | Windows |
 |---|---|---|
 | Global hotkeys | `XGrabKey` on the XWayland root window | `RegisterHotKey` |
 | Clipboard changes | `wl-clipboard-watch`, arboard polling as fallback | `WM_CLIPBOARDUPDATE` |
 | Paste keystroke | `/dev/uinput` | `SendInput` |
+| Paste target window | `GetInputFocus` / `SetInputFocus` on XWayland | `GetForegroundWindow` / `SetForegroundWindow` |
 | Single instance | abstract unix socket | named mutex |
 
 Everything above `fastpaste-platform` is platform-independent; adding an
@@ -75,8 +76,11 @@ rather than silently reverted.
   reports that case as "already claimed by another application"
 - Clipboard history folder: bounded ring populated by watching the system
   clipboard (wlr-data-control), rendered as a virtual folder in the tree
-- Paste via `/dev/uinput` Ctrl+V emulation, with the previous clipboard
-  contents restored afterwards
+- Paste by emulating Ctrl+V — or Shift+Insert, for terminals — into the
+  window that had focus when the hotkey was pressed, with the previous
+  clipboard contents (text, an image, or copied files) restored
+  afterwards. A clipboard holding anything else that cannot be saved
+  cancels the paste rather than being overwritten
 - System tray icon with context menu (Slint native `SystemTrayIcon`)
 - Localization: English, Russian, German, Spanish, Simplified Chinese
 - Single-instance guard (abstract unix socket, kernel-released on exit)
@@ -100,6 +104,8 @@ The app starts and stays useful when a piece of the desktop is missing:
 | Missing | Effect |
 |---|---|
 | `/dev/uinput` | Paste puts the payload on the clipboard and leaves it there for a manual Ctrl+V; nothing else changes |
+| Synthetic input reaching the target (Windows: an elevated window refuses it, under UIPI) | Same as above: the payload is left on the clipboard for a manual paste, instead of the old clipboard being put back |
+| An X11 window with focus when the hotkey fires (Linux) | No target window is captured, so the paste goes to whichever window the compositor focuses once the dialog closes. See the Linux paste notes below |
 | XWayland / X connection | Global hotkeys do not fire at all (as opposed to firing only over X11 windows — see the limitation at the top). The tray, main window and clipboard history all still work. A connection that drops later is reconnected automatically (up to 5 attempts, 500 ms apart), replaying the registered grabs; past that the hotkeys are inert until the app is restarted |
 | System tray | The app quits when the main window is closed, rather than staying resident with no way to reach it |
 | A readable `config.toml` | The unreadable file is moved to `config.toml.bak` and defaults are used, rather than failing to start |
@@ -180,6 +186,29 @@ No GUI, no platform code, no I/O beyond SQLite.
 - `error.rs` — `DataError`, the layer's error enum
 - `migrations/` — refinery SQL migrations (`V001__initial_schema.sql`)
 
+### Linux paste notes
+
+- **The paste chord uses physical keys.** `/dev/uinput` emits the
+  *physical* `KEY_V` (and `KEY_INSERT`) position, and the compositor
+  maps it through your layout. On a non-Latin layout such as Russian,
+  toolkits fall back to the Latin layout for shortcuts and Ctrl+V works;
+  on a Latin layout that moves V — Dvorak, Colemak — the chord lands on
+  whatever letter sits at the QWERTY V position, and the paste does not
+  happen. Insert is in the same place on every layout, so the
+  Shift+Insert paste method (Options → Paste) is the layout-proof choice
+  there, and the one terminals want anyway.
+- **Held modifiers are not released.** On Windows, a modifier you are
+  still holding when the chord fires is released first, so the chord is
+  exactly Ctrl+V. A uinput device cannot read the real keyboards' state,
+  so Linux does not do this; by the time you pick a snippet from the
+  dialog the hotkey is long released.
+- **Focus restore is X11-only.** The target window is captured with
+  `GetInputFocus`, so it is only known when an X11/XWayland window had
+  focus — which is also the only time the hotkeys fire (see the
+  limitation at the top). The compositor may still ignore the
+  `SetInputFocus`; then, as with no target at all, the paste goes to
+  whichever window it focuses after the dialog closes.
+
 ### `fastpaste-platform` — Linux platform layer
 
 Everything that touches the OS/desktop environment:
@@ -196,8 +225,13 @@ Everything that touches the OS/desktop environment:
   short TTL (`suppress_text`), so an announced write that never lands —
   or that the polling fallback never observes — expires instead of
   swallowing the user's next real copy
-- `uinput.rs` — `EvdevUinputCtrlV` / `NullUinputCtrlV`: `/dev/uinput`
-  Ctrl+V emulation, degrading gracefully when the device is unavailable
+- `paste_keys.rs` — `PasteKeys` trait + `EvdevPasteKeys` (`/dev/uinput`)
+  / `WindowsPasteKeys` (`SendInput`) / `NullPasteKeys`. The chord for
+  each `PasteMethod` (Ctrl+V, Shift+Insert) comes from a pure builder that
+  is tested without a device; on Windows every stroke carries a scan code
+  and held modifiers are released first
+- `foreground.rs` — `ForegroundWindow` trait: capture the window that had
+  focus when the hotkey fired, give it focus back before the keystroke
 - `take_once.rs` — `TakeOnceChannel`, a one-shot hand-off primitive used
   by the hotkey event path
 
@@ -218,10 +252,13 @@ Orchestrates data + platform into long-lived services:
   clipboard watcher, exposed as a virtual folder. `max_items` resizes
   live, trimming from the oldest end
 - `paster.rs` — `Paster`: the paste sequence (snapshot → set clipboard →
-  delay → Ctrl+V via uinput → restore). Whole sequences are serialised,
-  the restore runs even when the keystroke fails, and it is skipped when
-  no keystroke was sent at all (so the manual-Ctrl+V fallback has
-  something left to paste)
+  refocus the target → delay → keystroke → delay → restore). The second
+  delay matters: the keystroke is only queued, and restoring at once let
+  the target paste the *old* clipboard. Whole sequences are serialised,
+  the restore runs even when the keystroke fails, it is skipped when no
+  keystroke was sent or the OS refused it (so the manual-paste fallback
+  has something left to paste), and it is skipped when you copied
+  something else mid-paste (your newer copy wins)
 - `paths.rs` — single source of truth for XDG `config_dir` / `data_dir`
 
 ### `fastpaste-gui` — Slint frontend (binary `fastpaste-gui`)
@@ -300,6 +337,8 @@ position = "bottom"          # "top" | "bottom"
 [paste]
 delay_ms = 70                # pause between clipboard set and Ctrl+V; clamped to 0..=5000
 restore_clipboard = true     # put the previous clipboard back after paste
+restore_delay_ms = 120       # pause between the keystroke and the restore; clamped to 0..=5000
+method = "ctrl_v"            # "ctrl_v" | "shift_insert"; an unknown value falls back to "ctrl_v"
 ```
 
 Numeric values are clamped to the ranges above on load, so a hand-edited
@@ -334,9 +373,10 @@ are pinned in the crate that owns them.
 | `directories` | app | XDG `data_dir`/`config_dir` resolution |
 | `confy` | app | TOML config load/save |
 | `single-instance` | app | Single-instance guard: abstract unix socket keyed on the data dir (no lock file, kernel-released on exit) |
-| `arboard` (feature `wayland-data-control`) | platform | Clipboard read/write (`set_text`/`text`): native data-control protocol on Wayland — the same transport as the watcher — with arboard's X11 backend as fallback when the compositor offers no data-control |
+| `arboard` (feature `wayland-data-control`) | platform | Clipboard read/write (text, and images and file lists for the paste snapshot): native data-control protocol on Wayland — the same transport as the watcher — with arboard's X11 backend as fallback when the compositor offers no data-control |
 | `wl-clipboard-watch` | platform | Event-driven clipboard change detection (ext/wlr-data-control); the platform layer falls back to arboard polling when neither protocol is available |
-| `evdev` | platform | `/dev/uinput` virtual keyboard to emit Ctrl+V; `KeyCode: FromStr` also resolves hotkey key names to physical kernel keycodes |
+| `wl-clipboard-rs` | platform | Listing the clipboard's offered MIME types, so a paste snapshot can tell an empty clipboard from one holding a format it cannot save. Already built as arboard's data-control backend |
+| `evdev` | platform | `/dev/uinput` virtual keyboard to emit Ctrl+V / Shift+Insert; `KeyCode: FromStr` also resolves hotkey key names to physical kernel keycodes |
 | `x11rb` | platform | XGrabKey global hotkeys on XWayland — physical keycodes, layout-independent (the `global-hotkey` crate resolves keysyms via the core keymap and fails under Cyrillic layouts); `GetModifierMapping` resolves real Alt/NumLock/Super modifier bits |
 | `libc` | platform | `poll(2)` for the hotkey reader's blocking loop (wakes on X traffic or a wake-pipe byte); already a transitive dep of x11rb |
 | `tempfile` | data, app (dev) | Temp directories in tests |
