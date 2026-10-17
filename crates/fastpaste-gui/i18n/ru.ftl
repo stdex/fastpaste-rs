@@ -37,6 +37,9 @@ options-position-top = Сверху
 options-position-bottom = Снизу
 options-paste-delay-label = Задержка перед вставкой (мс):
 options-restore-clipboard = Восстанавливать содержимое буфера обмена после вставки
+options-paste-method-label = Вставлять клавишами:
+options-paste-method-ctrl-v = Ctrl+V
+options-paste-method-shift-insert = Shift+Insert (терминалы)
 clipboard-history-folder = История буфера обмена
 
 # Delete confirmation, options validation feedback, and the

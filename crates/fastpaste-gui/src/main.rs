@@ -34,7 +34,8 @@ use std::sync::{Arc, Mutex};
 use fastpaste_app::{AppContext, Settings};
 use fastpaste_data::{EncryptionState, Item, ItemKind};
 use fastpaste_platform::{
-    ForegroundToken, GlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID, SecretStore as _,
+    ForegroundToken, GlobalHotkey, OPEN_DIALOG_ID, OPEN_MAIN_WINDOW_ID, PasteMethod,
+    SecretStore as _,
 };
 
 // `Model` trait is in scope so we can call `.row_data()` on a `ModelRc` in
@@ -2311,6 +2312,23 @@ fn seed_options_dialog(d: &OptionsDialog, s: &Settings) {
     ) as i32);
     d.set_paste_delay_ms(s.paste.delay_ms as i32);
     d.set_paste_restore_clipboard(s.paste.restore_clipboard);
+    d.set_paste_method_index(row_for_paste_method(s.paste.method));
+}
+
+/// The Options paste-method combobox lists [`PasteMethod::ALL`] in order;
+/// a row outside it (never produced by the widget) reads as the default.
+fn paste_method_for_row(row: i32) -> PasteMethod {
+    usize::try_from(row)
+        .ok()
+        .and_then(|i| PasteMethod::ALL.get(i).copied())
+        .unwrap_or_default()
+}
+
+fn row_for_paste_method(method: PasteMethod) -> i32 {
+    PasteMethod::ALL
+        .iter()
+        .position(|m| *m == method)
+        .unwrap_or(0) as i32
 }
 
 /// Read the dialog's fields into a candidate `Settings`.
@@ -2340,6 +2358,7 @@ fn settings_from_dialog(current: &Settings, d: &OptionsDialog) -> Settings {
 
     s.paste.delay_ms = d.get_paste_delay_ms().max(0) as u64;
     s.paste.restore_clipboard = d.get_paste_restore_clipboard();
+    s.paste.method = paste_method_for_row(d.get_paste_method_index());
 
     s.clamp();
     s
@@ -2607,6 +2626,9 @@ where
     t.set_options_position_bottom(m("options-position-bottom").into());
     t.set_options_paste_delay_label(m("options-paste-delay-label").into());
     t.set_options_restore_clipboard(m("options-restore-clipboard").into());
+    t.set_options_paste_method_label(m("options-paste-method-label").into());
+    t.set_options_paste_method_ctrl_v(m("options-paste-method-ctrl-v").into());
+    t.set_options_paste_method_shift_insert(m("options-paste-method-shift-insert").into());
     t.set_options_ok(m("options-ok").into());
     t.set_options_cancel(m("options-cancel").into());
     t.set_options_apply(m("options-apply").into());
@@ -2917,6 +2939,24 @@ mod tests {
         assert_eq!(lang_index_for_code("kl"), 0);
         assert_eq!(lang_index_for_code(""), 0);
         assert_eq!(LANGUAGES[0].0, "system", "index 0 must stay `system`");
+    }
+
+    // ---- paste method combobox -------------------------------------------
+
+    /// The Options dropdown lists `PasteMethod::ALL` in order; each row
+    /// must decode to the method it shows, and back.
+    #[test]
+    fn paste_method_rows_map_both_ways() {
+        for (row, method) in PasteMethod::ALL.into_iter().enumerate() {
+            assert_eq!(paste_method_for_row(row as i32), method);
+            assert_eq!(row_for_paste_method(method), row as i32);
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_paste_method_row_is_ctrl_v() {
+        assert_eq!(paste_method_for_row(-1), PasteMethod::CtrlV);
+        assert_eq!(paste_method_for_row(99), PasteMethod::CtrlV);
     }
 
     // ---- translation coverage -------------------------------------------

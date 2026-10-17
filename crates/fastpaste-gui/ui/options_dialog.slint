@@ -9,7 +9,7 @@
 //   General            → GeneralSettings.language (ComboBox)
 //   Hot Keys           → HotkeySettings.open_dialog / .open_main_window
 //   Clipboard History  → ClipboardHistorySettings.enabled / .max_items / .position
-//   Paste Options      → PasteSettings.delay_ms / .restore_clipboard
+//   Paste Options      → PasteSettings.delay_ms / .method / .restore_clipboard
 //
 // Buttons: OK / Cancel / Apply. They fire the matching callback; the
 // controller (main.rs) reads the in-out properties and either persists
@@ -110,6 +110,9 @@ export component OptionsDialog inherits Window {
     // -- Paste Options --------------------------------------------------------
     in-out property <int> paste-delay-ms: 70;
     in-out property <bool> paste-restore-clipboard: true;
+    // Row in the paste-method combobox, in `PasteMethod::ALL` order
+    // (0 = Ctrl+V, 1 = Shift+Insert); `main.rs` maps it both ways.
+    in-out property <int> paste-method-index: 0;
 
     // -- Security ------------------------------------------------------------
     // `security-encrypted` picks which of the two field groups is shown
@@ -327,6 +330,17 @@ export component OptionsDialog inherits Window {
                                         maximum: root.paste-delay-max;
                                         value <=> root.paste-delay-ms;
                                     }
+                                }
+                                Rectangle { horizontal-stretch: 1; }
+                            }
+                            Row {
+                                FLabel { text: Translations.options-paste-method-label; }
+                                FComboBox {
+                                    model: [
+                                        Translations.options-paste-method-ctrl-v,
+                                        Translations.options-paste-method-shift-insert,
+                                    ];
+                                    current-index <=> root.paste-method-index;
                                 }
                                 Rectangle { horizontal-stretch: 1; }
                             }

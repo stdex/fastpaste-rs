@@ -152,7 +152,7 @@ fn paste_config(p: &PasteSettings) -> PasteConfig {
         delay_ms: p.delay_ms,
         restore_clipboard: p.restore_clipboard,
         restore_delay_ms: p.restore_delay_ms,
-        method: fastpaste_platform::PasteMethod::CtrlV,
+        method: p.method,
     }
 }
 
@@ -661,6 +661,57 @@ mod tests {
         let target = ctx.foreground.capture();
         ctx.paster.paste_text_to("payload", &target).unwrap();
         assert_eq!(*fg.0.lock().unwrap(), vec![Some(9)]);
+    }
+
+    /// Choosing Shift+Insert in Options must change the keystroke, live.
+    #[test]
+    fn the_paste_method_setting_reaches_the_keystroke() {
+        #[derive(Default)]
+        struct Keys(Mutex<Vec<fastpaste_platform::PasteMethod>>);
+        impl PasteKeys for Keys {
+            fn available(&self) -> bool {
+                true
+            }
+            fn send_paste(
+                &self,
+                method: fastpaste_platform::PasteMethod,
+            ) -> Result<(), PasteKeyError> {
+                self.0.lock().unwrap().push(method);
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db_path = dir.path().join("t.sqlite");
+        let db = Arc::new(Mutex::new(Database::open(&db_path, false).unwrap()));
+        let keys = Arc::new(Keys::default());
+        let mut settings = Settings::default();
+        settings.paste.delay_ms = 0;
+        settings.paste.restore_delay_ms = 0;
+        let ctx = AppContext::new(
+            db,
+            Arc::new(NullClipboard::new()),
+            keys.clone(),
+            Arc::new(NullGlobalHotkey::new()),
+            Arc::new(NullForegroundWindow),
+            settings.clone(),
+            None,
+            db_path,
+            Arc::new(fastpaste_platform::NullSecretStore::new()),
+        );
+
+        ctx.paster.paste_text("a").unwrap();
+        settings.paste.method = fastpaste_platform::PasteMethod::ShiftInsert;
+        ctx.set_settings(settings);
+        ctx.paster.paste_text("b").unwrap();
+
+        assert_eq!(
+            *keys.0.lock().unwrap(),
+            vec![
+                fastpaste_platform::PasteMethod::CtrlV,
+                fastpaste_platform::PasteMethod::ShiftInsert
+            ]
+        );
     }
 
     #[test]

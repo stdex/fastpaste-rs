@@ -12,6 +12,7 @@
 //! This is the same pattern the C++ fastpaste config has always relied on.
 
 use fastpaste_data::HistoryPosition;
+use fastpaste_platform::PasteMethod;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -165,6 +166,43 @@ pub struct PasteSettings {
     /// the target read the old clipboard instead of the snippet.
     #[serde(default = "PasteSettings::default_restore_delay_ms")]
     pub restore_delay_ms: u64,
+    /// Which chord pastes: Ctrl+V, or Shift+Insert for terminals.
+    #[serde(default, with = "paste_method_format")]
+    pub method: PasteMethod,
+}
+
+/// `PasteMethod` lives in the platform crate, which knows nothing about
+/// config files, so its on-disk spelling is defined here.
+///
+/// Hand-written rather than a serde `remote` derive so that a value this
+/// build does not know (a newer version's, or a typo) falls back to the
+/// default. A derive would fail the whole file instead, and a file that
+/// fails to parse is moved aside — every other setting with it.
+mod paste_method_format {
+    use fastpaste_platform::PasteMethod;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    fn name(method: PasteMethod) -> &'static str {
+        match method {
+            PasteMethod::CtrlV => "ctrl_v",
+            PasteMethod::ShiftInsert => "shift_insert",
+        }
+    }
+
+    pub fn serialize<S: Serializer>(method: &PasteMethod, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(name(*method))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PasteMethod, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(PasteMethod::ALL
+            .into_iter()
+            .find(|m| name(*m) == raw)
+            .unwrap_or_else(|| {
+                tracing::warn!("paste.method {raw:?} is not known; using the default");
+                PasteMethod::default()
+            }))
+    }
 }
 
 impl PasteSettings {
@@ -185,6 +223,7 @@ impl Default for PasteSettings {
             delay_ms: Self::default_delay_ms(),
             restore_clipboard: Self::default_restore_clipboard(),
             restore_delay_ms: Self::default_restore_delay_ms(),
+            method: PasteMethod::default(),
         }
     }
 }
@@ -358,6 +397,7 @@ mod tests {
             "`restore_clipboard` must default true"
         );
         assert_eq!(s.paste.restore_delay_ms, 120);
+        assert_eq!(s.paste.method, PasteMethod::CtrlV);
     }
 
     /// Save -> load must round-trip exactly, through the real
@@ -389,6 +429,7 @@ mod tests {
                 delay_ms: 123,
                 restore_clipboard: false,
                 restore_delay_ms: 456,
+                method: PasteMethod::ShiftInsert,
             },
         };
 
@@ -404,6 +445,7 @@ mod tests {
         assert_eq!(loaded.paste.delay_ms, 123);
         assert!(!loaded.paste.restore_clipboard);
         assert_eq!(loaded.paste.restore_delay_ms, 456);
+        assert_eq!(loaded.paste.method, PasteMethod::ShiftInsert);
 
         // `dir` removes itself (and config.toml) on drop.
     }
@@ -479,6 +521,56 @@ mod tests {
         let loaded = Settings::load_from(&path).unwrap();
         assert_eq!(loaded.general.language, "ru");
         assert_eq!(loaded.paste.delay_ms, 90);
+    }
+
+    /// The on-disk spelling is part of the file format: a hand-edited
+    /// config, and every config already written, depends on it.
+    #[test]
+    fn paste_method_round_trips_toml() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        for (method, spelled) in [
+            (PasteMethod::CtrlV, "ctrl_v"),
+            (PasteMethod::ShiftInsert, "shift_insert"),
+        ] {
+            let mut s = Settings::default();
+            s.paste.method = method;
+            s.save_to(&path).unwrap();
+            let raw = std::fs::read_to_string(&path).unwrap();
+            assert!(raw.contains(&format!("method = \"{spelled}\"")), "{raw}");
+            assert_eq!(Settings::load_from(&path).unwrap().paste.method, method);
+        }
+    }
+
+    #[test]
+    fn a_config_without_a_paste_method_loads_as_ctrl_v() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[paste]\ndelay_ms = 90\n").unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.paste.method, PasteMethod::CtrlV);
+        assert_eq!(loaded.paste.delay_ms, 90);
+    }
+
+    /// A method this build does not know — written by a newer one, or a
+    /// typo — falls back to the default rather than failing the whole
+    /// file, which would move every setting aside to `.bak`.
+    #[test]
+    fn an_unknown_paste_method_falls_back_without_losing_the_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[general]\nlanguage = \"ru\"\n\n[paste]\nmethod = \"alt_insert\"\ndelay_ms = 90\n",
+        )
+        .unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(loaded.paste.method, PasteMethod::CtrlV);
+        assert_eq!(loaded.paste.delay_ms, 90);
+        assert_eq!(
+            loaded.general.language, "ru",
+            "the rest of the file survives"
+        );
     }
 
     /// A `[paste]` section written before `restore_delay_ms` existed keeps

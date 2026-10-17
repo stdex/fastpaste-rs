@@ -36,6 +36,9 @@ options-position-top = Arriba
 options-position-bottom = Abajo
 options-paste-delay-label = Retardo de pegado (ms):
 options-restore-clipboard = Restaurar el contenido del portapapeles después de pegar
+options-paste-method-label = Pegar con:
+options-paste-method-ctrl-v = Ctrl+V
+options-paste-method-shift-insert = Mayús+Insert (terminales)
 clipboard-history-folder = Historial del portapapeles
 
 # Delete confirmation, options validation feedback, and the

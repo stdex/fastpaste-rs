@@ -36,6 +36,9 @@ options-position-top = Oben
 options-position-bottom = Unten
 options-paste-delay-label = Einfügeverzögerung (ms):
 options-restore-clipboard = Zwischenablageinhalt nach dem Einfügen wiederherstellen
+options-paste-method-label = Einfügen mit:
+options-paste-method-ctrl-v = Strg+V
+options-paste-method-shift-insert = Umschalt+Einfg (Terminals)
 clipboard-history-folder = Zwischenablageverlauf
 
 # Delete confirmation, options validation feedback, and the

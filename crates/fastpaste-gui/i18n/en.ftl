@@ -43,6 +43,9 @@ options-position-top = Top
 options-position-bottom = Bottom
 options-paste-delay-label = Paste delay (ms):
 options-restore-clipboard = Restore clipboard contents after pasting
+options-paste-method-label = Paste with:
+options-paste-method-ctrl-v = Ctrl+V
+options-paste-method-shift-insert = Shift+Insert (terminals)
 clipboard-history-folder = Clipboard History
 
 # Delete confirmation, options validation feedback, and the

@@ -59,6 +59,13 @@ impl PasteKeyError {
 pub enum PasteMethod {
     #[default]
     CtrlV,
+    /// For terminals and PuTTY, where Ctrl+V is a control character.
+    ShiftInsert,
+}
+
+impl PasteMethod {
+    /// Every method, in the order a settings UI lists them.
+    pub const ALL: [Self; 2] = [Self::CtrlV, Self::ShiftInsert];
 }
 
 pub trait PasteKeys: Send + Sync {
@@ -83,7 +90,12 @@ pub trait PasteKeys: Send + Sync {
 /// and avoids the huge keymaps some compositors handle poorly, and a key
 /// outside it would be silently dropped by the kernel.
 #[cfg(target_os = "linux")]
-const DEVICE_KEYS: [KeyCode; 2] = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V];
+const DEVICE_KEYS: [KeyCode; 4] = [
+    KeyCode::KEY_LEFTCTRL,
+    KeyCode::KEY_V,
+    KeyCode::KEY_LEFTSHIFT,
+    KeyCode::KEY_INSERT,
+];
 
 /// The key transitions that make up one paste chord, in order.
 ///
@@ -102,6 +114,7 @@ const DEVICE_KEYS: [KeyCode; 2] = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V];
 fn paste_frames(method: PasteMethod) -> Vec<(KeyCode, bool)> {
     let (modifier, key) = match method {
         PasteMethod::CtrlV => (KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V),
+        PasteMethod::ShiftInsert => (KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_INSERT),
     };
     vec![
         (modifier, true),
@@ -193,7 +206,9 @@ impl PasteKeys for EvdevPasteKeys {
 /// compiles — and is tested — on every platform.
 #[cfg(any(windows, test))]
 mod vk {
+    pub const SHIFT: u16 = 0x10;
     pub const CONTROL: u16 = 0x11;
+    pub const INSERT: u16 = 0x2D;
     pub const V: u16 = 0x56;
     pub const LSHIFT: u16 = 0xA0;
     pub const RSHIFT: u16 = 0xA1;
@@ -226,6 +241,7 @@ impl ModMask {
     const LWIN: Self = Self(1 << 6);
     const RWIN: Self = Self(1 << 7);
     const CTRL: Self = Self(Self::LCTRL.0 | Self::RCTRL.0);
+    const SHIFT: Self = Self(Self::LSHIFT.0 | Self::RSHIFT.0);
     const ALT: Self = Self(Self::LALT.0 | Self::RALT.0);
     const WIN: Self = Self(Self::LWIN.0 | Self::RWIN.0);
 
@@ -263,7 +279,11 @@ const MODIFIER_KEYS: [(ModMask, u16); 8] = [
 /// `KEYEVENTF_EXTENDEDKEY`; without it right Ctrl reads as left Ctrl.
 #[cfg(any(windows, test))]
 fn is_extended(key: u16) -> bool {
-    matches!(key, vk::RCONTROL | vk::RMENU | vk::LWIN | vk::RWIN)
+    // Insert means the navigation-block key; without E0 it is numpad 0.
+    matches!(
+        key,
+        vk::RCONTROL | vk::RMENU | vk::LWIN | vk::RWIN | vk::INSERT
+    )
 }
 
 /// One key transition for `SendInput`, before it becomes an `INPUT`.
@@ -283,7 +303,8 @@ fn us_scan_code(key: u16) -> u16 {
     match key {
         vk::CONTROL | vk::LCONTROL | vk::RCONTROL => 0x1D,
         vk::V => 0x2F,
-        vk::LSHIFT => 0x2A,
+        vk::SHIFT | vk::LSHIFT => 0x2A,
+        vk::INSERT => 0x52,
         vk::RSHIFT => 0x36,
         vk::LMENU | vk::RMENU => 0x38,
         vk::LWIN => 0x5B,
@@ -323,6 +344,7 @@ fn windows_paste_inputs(
     };
     let (chord_modifier, modifier, key) = match method {
         PasteMethod::CtrlV => (ModMask::CTRL, vk::CONTROL, vk::V),
+        PasteMethod::ShiftInsert => (ModMask::SHIFT, vk::SHIFT, vk::INSERT),
     };
 
     let mut strokes = Vec::new();
@@ -687,6 +709,62 @@ mod tests {
         );
     }
 
+    /// Finding 8. Terminals (and PuTTY) paste on Shift+Insert. Insert is
+    /// an extended key: without the flag it reads as numpad 0.
+    #[test]
+    fn shift_insert_inputs_bracket_insert_with_shift() {
+        let strokes = windows_paste_inputs(PasteMethod::ShiftInsert, ModMask::NONE, |_| 0);
+        assert_eq!(
+            strokes,
+            vec![
+                KeyStroke {
+                    vk: vk::SHIFT,
+                    scan: 0x2A,
+                    up: false,
+                    extended: false
+                },
+                KeyStroke {
+                    vk: vk::INSERT,
+                    scan: 0x52,
+                    up: false,
+                    extended: true
+                },
+                KeyStroke {
+                    vk: vk::INSERT,
+                    scan: 0x52,
+                    up: true,
+                    extended: true
+                },
+                KeyStroke {
+                    vk: vk::SHIFT,
+                    scan: 0x2A,
+                    up: true,
+                    extended: false
+                },
+            ]
+        );
+    }
+
+    /// For Shift+Insert it is Shift that a held key can supply, and Ctrl
+    /// that has to go: Ctrl+Shift+Insert is not a paste.
+    #[test]
+    fn shift_insert_uses_a_held_shift_and_releases_a_held_ctrl() {
+        let strokes = windows_paste_inputs(
+            PasteMethod::ShiftInsert,
+            ModMask::LSHIFT | ModMask::LCTRL,
+            fake_layout,
+        );
+        let keys: Vec<(u16, bool)> = strokes.iter().map(|k| (k.vk, k.up)).collect();
+        assert_eq!(
+            keys,
+            vec![
+                (vk::LCONTROL, true),
+                (vk::INSERT, false),
+                (vk::INSERT, true)
+            ]
+        );
+    }
+
     /// The real lookup, where it exists.
     #[cfg(windows)]
     #[test]
@@ -726,16 +804,33 @@ mod tests {
         }
     }
 
-    /// The device only declares the keys it emits; a frame naming a key
-    /// outside that set would be silently dropped by the kernel.
     #[cfg(target_os = "linux")]
     #[test]
-    fn frames_only_use_declared_keys() {
-        for (key, _) in paste_frames(PasteMethod::CtrlV) {
-            assert!(
-                DEVICE_KEYS.contains(&key),
-                "{key:?} is not in the device's declared capability set"
-            );
+    fn shift_insert_frames_bracket_insert_with_shift() {
+        assert_eq!(
+            paste_frames(PasteMethod::ShiftInsert),
+            vec![
+                (KeyCode::KEY_LEFTSHIFT, true),
+                (KeyCode::KEY_INSERT, true),
+                (KeyCode::KEY_INSERT, false),
+                (KeyCode::KEY_LEFTSHIFT, false),
+            ]
+        );
+    }
+
+    /// The device only declares the keys it emits; a frame naming a key
+    /// outside that set would be silently dropped by the kernel — so a
+    /// method whose keys were never declared would paste nothing.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn shift_insert_keys_are_in_the_device_capability_set() {
+        for method in PasteMethod::ALL {
+            for (key, _) in paste_frames(method) {
+                assert!(
+                    DEVICE_KEYS.contains(&key),
+                    "{key:?} ({method:?}) is not in the device's declared capability set"
+                );
+            }
         }
     }
 }

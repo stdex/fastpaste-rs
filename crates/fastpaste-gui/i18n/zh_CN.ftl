@@ -36,6 +36,9 @@ options-position-top = 顶部
 options-position-bottom = 底部
 options-paste-delay-label = 粘贴延迟（毫秒）：
 options-restore-clipboard = 粘贴后恢复剪贴板内容
+options-paste-method-label = 粘贴方式：
+options-paste-method-ctrl-v = Ctrl+V
+options-paste-method-shift-insert = Shift+Insert（终端）
 clipboard-history-folder = 剪贴板历史
 
 # Delete confirmation, options validation feedback, and the

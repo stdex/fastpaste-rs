@@ -136,6 +136,9 @@ fn build_options(page: i32, ru: bool) -> Result<OptionsDialog, slint::PlatformEr
         t.set_options_restore_clipboard(
             "Восстанавливать содержимое буфера обмена после вставки".into(),
         );
+        t.set_options_paste_method_label("Вставлять клавишами:".into());
+        t.set_options_paste_method_ctrl_v("Ctrl+V".into());
+        t.set_options_paste_method_shift_insert("Shift+Insert (терминалы)".into());
         t.set_options_ok("ОК".into());
         t.set_options_cancel("Отмена".into());
         t.set_options_apply("Применить".into());
@@ -152,6 +155,8 @@ fn build_options(page: i32, ru: bool) -> Result<OptionsDialog, slint::PlatformEr
     d.set_paste_delay_min(0);
     d.set_paste_delay_max(5000);
     d.set_paste_restore_clipboard(true);
+    // The longer of the two labels, so clipping shows up if there is any.
+    d.set_paste_method_index(1);
 
     // Security page (page index 4 in the dialog). `page == 5` is this
     // preview's own convention for rendering the *encrypted* half of that
