@@ -117,6 +117,51 @@ The app starts and stays useful when a piece of the desktop is missing:
 | A clean shutdown during an encrypt / change / remove conversion | The original file is untouched — nothing is written to it until the replacement has been verified — and the partial `<name>.sqlite.new` left behind by the crash is deleted automatically at the next launch |
 | A way to recover a forgotten passphrase | None exists. Options → Security says so before you ever set one |
 
+## Install
+
+Packages are on the [Releases](https://github.com/stdex/fastpaste-rs/releases)
+page, with a `SHA256SUMS` file to check them against.
+
+**Debian, Ubuntu** (Ubuntu 22.04 / Debian 12 or newer):
+
+```
+sudo apt install ./fastpaste_X.Y.Z-1_amd64.deb
+```
+
+**Fedora**:
+
+```
+sudo dnf install ./fastpaste-X.Y.Z-1.x86_64.rpm
+```
+
+Either one installs `/usr/bin/fastpaste`, a menu entry, and a udev rule,
+`/usr/lib/udev/rules.d/70-fastpaste-uinput.rules`, that gives the user of
+the active local session access to `/dev/uinput`. Pasting needs that
+access; without it the snippet is left on the clipboard for you to paste
+by hand. The package applies the rule straight away — if
+`getfacl /dev/uinput` does not list your user afterwards, log out and back
+in. The trade-off is the usual one for this rule (Steam ships the same
+one): any program running as you can then synthesize keyboard input.
+
+The binary is built on Ubuntu 22.04, so it needs glibc 2.35 or newer, and
+it needs a Wayland session (see the limitation at the top).
+
+**Windows** (10 or later):
+
+- `fastpaste-X.Y.Z-windows-x64-setup.exe` installs for the current user
+  only — no administrator rights — with a Start-menu entry, an optional
+  *Automatically start fastpaste* checkbox, and an uninstaller under
+  Settings → Apps.
+- `fastpaste-X.Y.Z-windows-x64-portable.zip` holds the same `fastpaste.exe`,
+  to run from wherever you unpack it. It is portable in the sense of
+  needing no install: settings and snippets still live in your profile,
+  under `%APPDATA%\fastpaste`, not next to the exe.
+
+Neither is code-signed yet, so SmartScreen warns the first time you run
+them ("Windows protected your PC"); *More info* → *Run anyway* proceeds.
+Check the download against `SHA256SUMS` first
+(`Get-FileHash <file> -Algorithm SHA256` in PowerShell).
+
 ## Build prerequisites (Linux)
 
 - Rust 1.95+ (rustup recommended)
@@ -127,8 +172,13 @@ The app starts and stays useful when a piece of the desktop is missing:
 - A Wayland session (KDE Plasma 6 / KWin target) with XWayland available
   (global hotkeys grab via XGrabKey on the XWayland root window).
 - For paste via `/dev/uinput`: the user must have read/write access to
-  `/dev/uinput`. systemd-logind typically grants this via ACL on login for
-  physical sessions; check with `getfacl /dev/uinput`.
+  `/dev/uinput`; check with `getfacl /dev/uinput`. The packages install a
+  udev rule for this. From a source build, install the same rule:
+  ```
+  sudo cp packaging/linux/70-fastpaste-uinput.rules /etc/udev/rules.d/
+  sudo udevadm control --reload-rules
+  sudo udevadm trigger --action=change --sysname-match=uinput
+  ```
 
 ## Build
 
@@ -399,6 +449,53 @@ Version constraints worth knowing when upgrading:
   `wl-clipboard-rs-tools` binary (verified against docs.rs, 2026-08).
   Clipboard *watching* therefore stays on `wl-clipboard-watch`; don't
   "simplify" it away in favor of the transitive `wl-clipboard-rs`.
+
+## Releasing
+
+A release is built by `.github/workflows/release.yml` from a tag, and
+nothing becomes public until you publish the draft it makes.
+
+1. **Bump the version.** It lives in one place, `version` under
+   `[workspace.package]` in the root `Cargo.toml`; every crate, both
+   packages and the Windows version resource take it from there. Run
+   `cargo check` so `Cargo.lock` follows.
+2. **Update `CHANGELOG.md`.** Move the `Unreleased` entries under a new
+   `## [X.Y.Z] - YYYY-MM-DD` heading. That section becomes the release
+   notes.
+3. **Commit** both, and get the commit onto `main`.
+4. **Tag and push** that commit:
+   ```
+   git tag -a vX.Y.Z -m "fastpaste X.Y.Z"
+   git push origin vX.Y.Z
+   ```
+5. **Watch the Release workflow.** It refuses a tag that does not match
+   the version in `Cargo.toml`, or that has no `CHANGELOG.md` section. It
+   builds the `.deb` and `.rpm` on Ubuntu 22.04, installs each in clean
+   Ubuntu 22.04 / 24.04, Debian 12 and Fedora containers
+   (`packaging/linux/smoke-test.sh`), builds the Windows installer and
+   portable zip, and creates a **draft** release with them and
+   `SHA256SUMS`.
+6. **Review the draft** under Releases on GitHub: the notes, the file
+   list, and ideally one install. Then **Publish** it.
+
+A tag such as `v1.2.0-rc.1` (with the same version in `Cargo.toml`)
+makes a pre-release; the packages call it `1.2.0~rc.1` so that it sorts
+before `1.2.0`.
+
+To try the whole pipeline without tagging, run the workflow by hand
+(Actions → Release → Run workflow): everything is built and tested, the
+release step is skipped, and the files are left as the run's artifacts.
+
+If a tagged run fails, fix the problem, then move the tag:
+`git push --delete origin vX.Y.Z`, `git tag -d vX.Y.Z`, and tag again.
+Delete any draft the failed run left behind.
+
+What goes into the packages is in `packaging/` — the desktop file, the
+udev rule, the icons (`packaging/make-icons.py` regenerates them from new
+artwork) and the Inno Setup script — and in the `[package.metadata.deb]`
+and `[package.metadata.generate-rpm]` tables of
+`crates/fastpaste-gui/Cargo.toml`. The Windows files are not code-signed;
+the workflow has a marked stub where signing would go.
 
 ## License
 

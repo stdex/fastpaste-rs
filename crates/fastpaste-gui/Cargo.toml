@@ -1,7 +1,11 @@
 [package]
 name = "fastpaste-gui"
+description = "Clipboard history and snippet manager"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 publish.workspace = true
 
 [[bin]]
@@ -46,3 +50,69 @@ slint = { workspace = true, features = ["software-renderer-systemfonts"] }
 
 [build-dependencies]
 slint-build = { workspace = true, features = ["experimental-module-builds"] }
+# The Windows icon and version resource. Unconditional because build.rs
+# runs on the host: it checks the *target* at run time, and a dependency
+# gated on the target would be missing when it compiles.
+winresource = "0.1"
+
+# ---- Packages ----------------------------------------------------------
+#
+# One binary, built on the oldest supported glibc (the release workflow
+# uses ubuntu-22.04), goes into both packages, installed as `fastpaste`.
+#
+# `$auto` / auto-req only see what the binary links: libfontconfig and
+# libc (SQLCipher, OpenSSL and libdbus are built in). winit, glutin and
+# xkbcommon-dl dlopen the rest, so those are listed by hand, as measured
+# with `LD_DEBUG=libs` under a headless KWin (see "Packaging and
+# releases" in AGENTS.md):
+#
+#   soname                   Debian, Ubuntu       Fedora
+#   libwayland-client.so.0   libwayland-client0   libwayland-client
+#   libwayland-egl.so.1      libwayland-egl1      libwayland-egl
+#   libxkbcommon.so.0        libxkbcommon0        libxkbcommon
+#   libEGL.so.1              libegl1              libglvnd-egl
+#
+# packaging/linux/smoke-test.sh checks the same sonames; keep the three
+# lists in step.
+
+[package.metadata.deb]
+name = "fastpaste"
+maintainer = "stdex <sergey@rostunov.com>"
+copyright = "2026, The fastpaste authors"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+Keeps a history of what you copy and a library of saved snippets, and \
+pastes either into the window you were typing in, from a keyboard-driven \
+popup. Built for KDE Plasma 6 on Wayland. Installs a udev rule that gives \
+the logged-in user access to /dev/uinput, which pasting needs."""
+section = "utils"
+priority = "optional"
+depends = "$auto, libwayland-client0, libwayland-egl1, libxkbcommon0, libegl1"
+maintainer-scripts = "../../packaging/linux/scripts/"
+assets = [
+    ["target/release/fastpaste-gui", "usr/bin/fastpaste", "755"],
+    ["../../packaging/linux/fastpaste.desktop", "usr/share/applications/fastpaste.desktop", "644"],
+    ["../../packaging/linux/fastpaste-256.png", "usr/share/icons/hicolor/256x256/apps/fastpaste.png", "644"],
+    ["../../packaging/linux/fastpaste-32.png", "usr/share/icons/hicolor/32x32/apps/fastpaste.png", "644"],
+    ["../../packaging/linux/70-fastpaste-uinput.rules", "usr/lib/udev/rules.d/70-fastpaste-uinput.rules", "644"],
+    ["../../README.md", "usr/share/doc/fastpaste/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "fastpaste"
+post_install_script = "../../packaging/linux/scripts/postinst"
+assets = [
+    { source = "target/release/fastpaste-gui", dest = "/usr/bin/fastpaste", mode = "755" },
+    { source = "../../packaging/linux/fastpaste.desktop", dest = "/usr/share/applications/fastpaste.desktop", mode = "644" },
+    { source = "../../packaging/linux/fastpaste-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/fastpaste.png", mode = "644" },
+    { source = "../../packaging/linux/fastpaste-32.png", dest = "/usr/share/icons/hicolor/32x32/apps/fastpaste.png", mode = "644" },
+    { source = "../../packaging/linux/70-fastpaste-uinput.rules", dest = "/usr/lib/udev/rules.d/70-fastpaste-uinput.rules", mode = "644" },
+    { source = "../../README.md", dest = "/usr/share/doc/fastpaste/README.md", mode = "644", doc = true },
+    { source = "../../LICENSE", dest = "/usr/share/licenses/fastpaste/LICENSE", mode = "644", doc = true },
+]
+
+[package.metadata.generate-rpm.requires]
+libwayland-client = "*"
+libwayland-egl = "*"
+libxkbcommon = "*"
+libglvnd-egl = "*"

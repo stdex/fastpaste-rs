@@ -1,0 +1,12 @@
+# fastpaste pastes by typing Ctrl+V (or Shift+Insert) through a virtual
+# keyboard on /dev/uinput. `uaccess` has systemd-logind give the user of
+# the active local session read/write access to the device; without it the
+# snippet is left on the clipboard for a manual paste instead.
+#
+# The trade-off: any program that user runs can then type into any window.
+# Steam ships the same rule for its controller support.
+#
+# `static_node` tags /dev/uinput even before the uinput module is loaded,
+# on kernels where it is a module rather than built in. The file must sort
+# before 73-seat-late.rules, which is where the tag is acted on.
+KERNEL=="uinput", SUBSYSTEM=="misc", OPTIONS+="static_node=uinput", TAG+="uaccess"

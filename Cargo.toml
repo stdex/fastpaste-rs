@@ -8,11 +8,26 @@ members = [
 ]
 
 [workspace.package]
+# The one version of the app: every crate inherits it, the packages and the
+# Windows version resource take it from here, and the release workflow
+# refuses a `vX.Y.Z` tag that does not match it. See "Releasing" in the
+# README.
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT"
+repository = "https://github.com/stdex/fastpaste-rs"
+homepage = "https://github.com/stdex/fastpaste-rs"
 publish = false
+
+# What ships. Thin LTO with one codegen unit gets most of fat LTO's size
+# and speed for a fraction of its link time. `strip` drops the symbol
+# table: panic messages and logs keep their file and line, only a
+# `RUST_BACKTRACE` loses its function names.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

@@ -31,6 +31,13 @@ above that crate contains a `cfg`**, and nothing outside it names a
 concrete backend. Keep it that way: a `cfg` leaking into `app` or `gui`
 is the first step toward two codebases.
 
+The one exception is `#![cfg_attr(windows, windows_subsystem = "windows")]`
+at the top of `fastpaste-gui`'s `main.rs`: the subsystem is an attribute
+of the binary's root module, which no other crate can set. It is a link
+setting, not code, and it stays the only one. (`build.rs` is not an
+exception either: it runs on the host, so it tests the *target* through
+`CARGO_CFG_TARGET_OS` rather than a `cfg`.)
+
 Backends live in submodules (`hotkey/x11.rs`, `hotkey/windows.rs`,
 `clipboard/wayland.rs`, `clipboard/windows.rs`) and the shared file
 above them holds only the trait, the error type and the null backend.
@@ -437,6 +444,72 @@ Prefer a deterministic harness to a sleep. `BlockingClipboard` in
 `paster.rs` parks a write on a channel so a concurrency test cannot pass
 by luck — and note it is *armed* after setup, because a trap that fires
 on the test's own fixture deadlocks the test.
+
+---
+
+## Packaging and releases
+
+The procedure is in the README ("Releasing"); the files are in
+`packaging/`, `.github/workflows/release.yml`, and the
+`[package.metadata.deb]` / `[package.metadata.generate-rpm]` tables of
+`crates/fastpaste-gui/Cargo.toml`. What those do not say:
+
+- **The dlopened libraries are listed by hand.** cargo-deb's `$auto` and
+  cargo-generate-rpm's auto-req see only what the binary links:
+  fontconfig and the libc family (SQLCipher, OpenSSL and libdbus are
+  compiled in). winit, glutin and xkbcommon-dl dlopen the rest:
+  `libwayland-client.so.0`, `libxkbcommon.so.0`, `libEGL.so.1`,
+  `libwayland-egl.so.1`. Everything loaded after libEGL is glvnd loading
+  Mesa, not us, and `libwayland-cursor` is *not* used — the cursor theme
+  code is pure Rust. Re-check after a Slint or winit upgrade.
+- **How that list was measured:** the release binary with `LD_DEBUG=libs`
+  and `WAYLAND_DEBUG=client`, run as the session of a headless KWin
+  (`env -u LD_PRELOAD -u DISPLAY -u WAYLAND_DISPLAY dbus-run-session --
+  kwin_wayland --virtual --socket fp-test --xwayland --exit-with-session
+  <script>`), with `XDG_DATA_HOME` / `XDG_CONFIG_HOME` in a scratch dir.
+  Three things got in the way:
+  - EGL is loaded only when a window is created, and at startup there
+    is none — the tray is the way in, and the isolated D-Bus has no
+    StatusNotifierWatcher. A `fastpaste.sqlite` of a few KB of random
+    bytes reads as an encrypted database and puts the unlock dialog up
+    at once.
+  - The single-instance key is derived from the data dir and must fit
+    an abstract socket address (107 bytes), so a long scratch path fails
+    startup with "new abstract addr error". Use a short one.
+  - Scanning the binary for sonames (`grep -ao`) works only on a
+    **debug** build: in release, short strings such as `libEGL.so.1`
+    are folded into `mov` immediates and are not in the file as text.
+- **The Wayland app_id is `fastpaste`**, and must stay equal to the
+  desktop file's name: it is how KWin gives the window its icon and name.
+  `main()` sets it, which needs the Slint backend chosen first;
+  `WAYLAND_DEBUG=client` shows `set_app_id("fastpaste")`.
+- **cargo-generate-rpm uses a script path it cannot find as the script
+  text.** A wrong `post_install_script` still builds, and the RPM's
+  `%post` is then the path string, so `smoke-test.sh` checks the
+  scriptlet. Its paths are tried against the current directory first,
+  then the crate: run it from the workspace root.
+- **cargo-deb's `target/release/` prefix is magic**: it is replaced with
+  the real target dir, so leave it as written even with
+  `CARGO_TARGET_DIR`.
+- **The glibc floor is the build machine's.** The packages are built on
+  ubuntu-22.04 (glibc 2.35); a binary built on a newer host will not run
+  there. To reproduce the CI build, build inside an `ubuntu:22.04`
+  container with `build-essential pkg-config libfontconfig1-dev perl`,
+  then run `packaging/linux/smoke-test.sh` in clean containers as its
+  header shows.
+- **A release build is heavy.** Thin LTO with one codegen unit over
+  Slint, SQLCipher and OpenSSL ran a 16 GB machine out of memory and
+  took it down while other builds were running. Cap it:
+  `CARGO_BUILD_JOBS=6` plus `docker run --memory=8g` or
+  `systemd-run --user --scope -p MemoryMax=8G`.
+- **The static C runtime is checked, not assumed.** `+crt-static` is set
+  for the MSVC target only (`CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS`),
+  so build scripts keep the default, and the release job fails if
+  `dumpbin /dependents` lists vcruntime, msvcp or api-ms-win-crt.
+- `--version` is answered before anything else in `main()` — no
+  single-instance guard, no display — which is what lets the smoke test
+  run it in a bare container. On Windows the GUI subsystem has no
+  console, so it prints only when its output is redirected.
 
 ---
 

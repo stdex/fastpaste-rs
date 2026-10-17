@@ -14,5 +14,29 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = slint_build::CompilerConfiguration::new().with_style("fluent".into());
     slint_build::compile_with_config("ui/main.slint", config)?;
+    windows_resource()?;
     Ok(())
+}
+
+/// The icon Explorer and the taskbar show for the exe, and the version and
+/// name its Properties and Task Manager show. The version comes from the
+/// workspace, like everything else's.
+///
+/// A build script is compiled for the host, so `cfg(windows)` here would
+/// ask about the wrong machine; Cargo passes the target in the
+/// environment instead.
+fn windows_resource() -> std::io::Result<()> {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return Ok(());
+    }
+    const ICON: &str = "../../packaging/windows/fastpaste.ico";
+    println!("cargo:rerun-if-changed={ICON}");
+    winresource::WindowsResource::new()
+        .set_icon(ICON)
+        .set("ProductName", "fastpaste")
+        .set("FileDescription", "fastpaste")
+        .set("InternalName", "fastpaste")
+        .set("OriginalFilename", "fastpaste.exe")
+        .set("LegalCopyright", "Copyright (c) 2026 The fastpaste authors")
+        .compile()
 }

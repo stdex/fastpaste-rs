@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=fastpaste
+GenericName=Clipboard Manager
+GenericName[de]=Zwischenablage-Verwaltung
+GenericName[es]=Gestor del portapapeles
+GenericName[ru]=Менеджер буфера обмена
+GenericName[zh_CN]=剪贴板管理器
+Comment=Clipboard history and snippet manager
+Comment[de]=Zwischenablage-Verlauf und Schnipsel-Verwaltung
+Comment[es]=Historial del portapapeles y gestor de fragmentos
+Comment[ru]=История буфера обмена и библиотека фрагментов
+Comment[zh_CN]=剪贴板历史与片段管理器
+Keywords=clipboard;history;snippet;paste;
+Exec=fastpaste
+Icon=fastpaste
+Terminal=false
+Categories=Utility;
+StartupNotify=false

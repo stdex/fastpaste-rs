@@ -1,0 +1,14 @@
+#!/bin/sh
+# Post-install script of both the .deb and the .rpm.
+#
+# udev applies a new rule only to devices it processes afterwards, so
+# without this 70-fastpaste-uinput.rules would reach /dev/uinput only at
+# the next boot. Skipped where udev is not running, as in a container.
+set -e
+
+if [ -d /run/udev ] && command -v udevadm >/dev/null 2>&1; then
+    udevadm control --reload-rules || true
+    udevadm trigger --action=change --sysname-match=uinput || true
+fi
+
+exit 0

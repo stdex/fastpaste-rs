@@ -1,0 +1,241 @@
+name: Release
+
+# Pushing a `vX.Y.Z` tag builds every release file, smoke-tests the Linux
+# packages in clean containers, and creates a *draft* GitHub release with
+# the files and SHA256SUMS. Nothing is public until a maintainer reviews
+# the draft and publishes it; see "Releasing" in the README.
+#
+#   fastpaste_X.Y.Z-1_amd64.deb             Debian, Ubuntu
+#   fastpaste-X.Y.Z-1.x86_64.rpm            Fedora
+#   fastpaste-X.Y.Z-windows-x64-setup.exe   per-user installer
+#   fastpaste-X.Y.Z-windows-x64-portable.zip
+#   SHA256SUMS
+#
+# Run it by hand (Actions -> Release -> Run workflow) to build and test
+# everything without a tag: the release job is skipped and the files stay
+# behind as the run's artifacts.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: version check
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      pkg-version: ${{ steps.check.outputs.pkg-version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag, Cargo.toml and CHANGELOG.md agree
+        id: check
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "fastpaste-gui") | .version')
+          echo "Cargo version: $version"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME does not match the version in Cargo.toml ($version). Bump [workspace.package] version, or tag v$version."
+              exit 1
+            fi
+            if ! awk -v h="## [$version]" 'index($0, h) == 1 { found = 1 } END { exit !found }' CHANGELOG.md; then
+              echo "::error::CHANGELOG.md has no '## [$version]' section to use as the release notes."
+              exit 1
+            fi
+          fi
+          # Packages want a pre-release to sort before its release:
+          # 1.2.0-rc.1 is 1.2.0~rc.1 to dpkg and rpm.
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "pkg-version=${version//-/\~}" >> "$GITHUB_OUTPUT"
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+  linux:
+    name: linux packages
+    needs: version
+    # The oldest supported glibc: the binary runs on this and anything
+    # newer. The same binary goes into both packages.
+    runs-on: ubuntu-22.04
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PKG_VERSION: ${{ needs.version.outputs.pkg-version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Only fontconfig is linked. SQLCipher, OpenSSL and libdbus are
+      # built from source; the Wayland, xkbcommon and EGL libraries are
+      # dlopened at run time, so they need no headers here.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p fastpaste-gui
+      - name: Check the binary
+        run: |
+          test "$(target/release/fastpaste-gui --version)" = "fastpaste $VERSION"
+          echo "newest glibc symbol needed:"
+          objdump -T target/release/fastpaste-gui | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
+      - name: Install cargo-deb and cargo-generate-rpm
+        run: cargo install --locked cargo-deb@3.8.0 cargo-generate-rpm@0.21.1
+      - name: Package
+        run: |
+          mkdir -p dist
+          cargo deb --no-build -p fastpaste-gui --deb-version "$PKG_VERSION-1" -o dist/
+          cargo generate-rpm -p crates/fastpaste-gui -s "version = \"$PKG_VERSION\"" -o dist/
+          ls -l dist
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: dist/*
+          if-no-files-found: error
+
+  smoke:
+    name: smoke test (${{ matrix.image }})
+    needs: [version, linux]
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ["ubuntu:22.04", "ubuntu:24.04", "debian:12", "fedora:latest"]
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: dist
+      - name: Install the package and check it
+        run: sh packaging/linux/smoke-test.sh dist "$VERSION"
+
+  windows:
+    name: windows installer + portable zip
+    needs: version
+    runs-on: windows-latest
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # Link the C runtime statically, so users need no Visual C++
+      # redistributable. Set for the target only: build scripts and proc
+      # macros keep the default.
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      # openssl-src assembles OpenSSL with NASM on Windows (as in ci.yml).
+      - name: Install NASM
+        run: choco install nasm -y --no-progress
+      - name: Add NASM to PATH
+        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+      - name: Install Inno Setup
+        run: choco upgrade innosetup -y --no-progress
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --locked -p fastpaste-gui --target x86_64-pc-windows-msvc
+      - name: Check the exe
+        shell: pwsh
+        run: |
+          $exe = "target\x86_64-pc-windows-msvc\release\fastpaste-gui.exe"
+          # crt-static took: nothing from the dynamic C runtime is imported.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $dumpbin = & $vswhere -latest -products * -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          $imports = & $dumpbin /nologo /dependents $exe | Out-String
+          Write-Output $imports
+          if ($imports -match '(?i)vcruntime|msvcp|api-ms-win-crt') { throw "the exe imports the dynamic C runtime" }
+          # A GUI-subsystem exe has no console: --version shows only when redirected.
+          $p = Start-Process -FilePath $exe -ArgumentList '--version' -NoNewWindow -Wait -PassThru -RedirectStandardOutput version.txt
+          $got = (Get-Content version.txt -Raw).Trim()
+          if ($p.ExitCode -ne 0 -or $got -ne "fastpaste $env:VERSION") { throw "--version printed '$got' (exit $($p.ExitCode))" }
+          Write-Output "ok: $got"
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force stage, dist | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\fastpaste-gui.exe stage\fastpaste.exe
+          Copy-Item LICENSE stage\LICENSE.txt
+      # ---- Code signing: not set up --------------------------------------
+      # Unsigned, the installer and the exe get a SmartScreen warning on
+      # first run (see the README). To sign: keep the certificate in
+      # repository secrets, sign stage\fastpaste.exe here, before it is
+      # zipped and packed into the installer, and set Inno Setup's
+      # SignTool= in packaging/windows/fastpaste.iss, which signs the
+      # installer and the uninstaller as they are built.
+      - name: Sign (not configured)
+        if: false
+        shell: pwsh
+        run: |
+          # signtool sign /fd sha256 /tr <timestamp-url> /td sha256 /f <cert.pfx> /p <password> stage\fastpaste.exe
+          throw "code signing is not configured"
+      - name: Package
+        shell: pwsh
+        run: |
+          Compress-Archive -Path stage\* -DestinationPath "dist\fastpaste-$env:VERSION-windows-x64-portable.zip"
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:VERSION" "/DStageDir=$PWD\stage" "/DOutDir=$PWD\dist" packaging\windows\fastpaste.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          Get-ChildItem dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: draft release
+    needs: [version, linux, smoke, windows]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Release notes from CHANGELOG.md
+        run: |
+          awk -v h="## [$VERSION]" '
+            index($0, h) == 1 { on = 1; next }
+            on && /^## / { exit }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          cat notes.md
+      - name: Create the draft release
+        run: |
+          flags="--draft --verify-tag"
+          if [ "$PRERELEASE" = true ]; then flags="$flags --prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" dist/* $flags \
+            --title "fastpaste $VERSION" --notes-file notes.md

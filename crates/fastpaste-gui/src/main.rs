@@ -1,3 +1,10 @@
+// The one `cfg` above `fastpaste-platform` (see AGENTS.md). Which subsystem
+// a Windows executable is linked for is decided by an attribute on the
+// binary's root module, and no other crate can set it. Without it Windows
+// opens a console window beside the app; with it the app has no stdout,
+// so `--version` prints only when its output is redirected.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 // Entry point. Wires together:
 //   - fastpaste-app:      AppContext (Settings + ClipboardHistory + DB +
 //                          Paster + clipboard/uinput/hotkey + lock)
@@ -150,7 +157,64 @@ fn is_wrong_passphrase(e: &anyhow::Error) -> bool {
     )
 }
 
+/// What the command line asks for.
+///
+/// Every launcher starts the app with no arguments: the desktop file, the
+/// Start-menu shortcut, the autostart entry. Anything other than the few
+/// flags below is refused rather than ignored, so a mistyped flag does
+/// not start the whole app.
+#[derive(Debug, PartialEq, Eq)]
+enum CliRequest {
+    Run,
+    Version,
+    Help,
+    /// The first argument that was not understood.
+    Unrecognized(String),
+}
+
+const USAGE: &str = "\
+Usage: fastpaste [--version | --help]
+
+Clipboard history and snippet manager. Run it without arguments to start it.
+";
+
+/// Reads the arguments after the program name. A flag must be the only
+/// argument.
+fn parse_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> CliRequest {
+    let mut args = args.into_iter();
+    let Some(first) = args.next() else {
+        return CliRequest::Run;
+    };
+    let request = match first.to_str() {
+        Some("--version" | "-V") => CliRequest::Version,
+        Some("--help" | "-h") => CliRequest::Help,
+        _ => return CliRequest::Unrecognized(first.to_string_lossy().into_owned()),
+    };
+    match args.next() {
+        None => request,
+        Some(extra) => CliRequest::Unrecognized(extra.to_string_lossy().into_owned()),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
+    // Answered before anything else: no single-instance guard, no display,
+    // so the packages' smoke tests can run it in a bare container.
+    match parse_args(std::env::args_os().skip(1)) {
+        CliRequest::Run => {}
+        CliRequest::Version => {
+            println!("fastpaste {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        CliRequest::Help => {
+            print!("{USAGE}");
+            return Ok(());
+        }
+        CliRequest::Unrecognized(arg) => {
+            eprint!("fastpaste: unrecognized argument '{arg}'\n\n{USAGE}");
+            std::process::exit(2);
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -159,6 +223,15 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     tracing::info!("fastpaste-gui starting");
+
+    // KWin ties a window to its desktop file, and so to its icon and name
+    // in the task manager, by the Wayland app_id. Slint sets one only when
+    // asked, reads it when a window is first created, and can only be
+    // asked once a backend is chosen — so the backend is chosen here,
+    // before anything is shown. The id must match `fastpaste.desktop`;
+    // off Linux it is ignored.
+    slint::BackendSelector::new().select()?;
+    slint::set_xdg_app_id("fastpaste")?;
 
     // ---- Phase one: guard, settings, encryption state ------------------------
     // Nothing is opened and no device is claimed here, because an
@@ -3352,5 +3425,46 @@ mod tests {
     fn a_non_data_error_is_not_a_wrong_passphrase() {
         let e = anyhow::Error::new(std::io::Error::other("clipboard backend unavailable"));
         assert!(!is_wrong_passphrase(&e));
+    }
+
+    // ---- parse_args ------------------------------------------------------
+
+    fn args(list: &[&str]) -> Vec<std::ffi::OsString> {
+        list.iter().map(Into::into).collect()
+    }
+
+    #[test]
+    fn no_arguments_starts_the_app() {
+        assert_eq!(parse_args(args(&[])), CliRequest::Run);
+    }
+
+    #[test]
+    fn version_and_help_have_long_and_short_forms() {
+        assert_eq!(parse_args(args(&["--version"])), CliRequest::Version);
+        assert_eq!(parse_args(args(&["-V"])), CliRequest::Version);
+        assert_eq!(parse_args(args(&["--help"])), CliRequest::Help);
+        assert_eq!(parse_args(args(&["-h"])), CliRequest::Help);
+    }
+
+    /// A typo must not start the app as if no argument had been given.
+    #[test]
+    fn an_unknown_argument_is_refused_not_ignored() {
+        assert_eq!(
+            parse_args(args(&["--verison"])),
+            CliRequest::Unrecognized("--verison".into())
+        );
+        // `-v` is not `-V`: lower case is often "verbose".
+        assert_eq!(
+            parse_args(args(&["-v"])),
+            CliRequest::Unrecognized("-v".into())
+        );
+    }
+
+    #[test]
+    fn a_flag_must_be_the_only_argument() {
+        assert_eq!(
+            parse_args(args(&["--version", "extra"])),
+            CliRequest::Unrecognized("extra".into())
+        );
     }
 }
