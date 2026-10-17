@@ -1354,6 +1354,18 @@ fn activated_row_text(win: &MainWindow, ctx: &AppContext) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// Which window the selection dialog should paste into after it is
+/// asked for again. While it is already on screen, the window that had
+/// focus is the dialog itself — on Windows, our own window — so the
+/// target it was opened for stands.
+fn next_dialog_target(
+    already_showing: bool,
+    current: ForegroundToken,
+    captured: ForegroundToken,
+) -> ForegroundToken {
+    if already_showing { current } else { captured }
+}
+
 /// Paste `text` on a worker thread, into the window `target` captured
 /// (an empty token pastes wherever focus is).
 ///
@@ -1481,7 +1493,12 @@ fn parent_for_new_item(row: &TreeItem) -> i64 {
 fn show_dialog_and_paste(ctx: Arc<AppContext>, target: ForegroundToken) {
     // Every invocation brings its own target, so it is stored rather than
     // captured by the paste callback: the singleton dialog outlives it.
-    ui_state::set_dialog_target(target);
+    let showing = live(&SELECTION_DIALOG).is_some_and(|d| d.window().is_visible());
+    ui_state::set_dialog_target(next_dialog_target(
+        showing,
+        ui_state::dialog_target(),
+        target,
+    ));
 
     // Singleton: if one is already alive, refresh its contents.
     if let Some(d) = live(&SELECTION_DIALOG) {
@@ -2939,6 +2956,35 @@ mod tests {
         assert_eq!(lang_index_for_code("kl"), 0);
         assert_eq!(lang_index_for_code(""), 0);
         assert_eq!(LANGUAGES[0].0, "system", "index 0 must stay `system`");
+    }
+
+    // ---- selection dialog target -------------------------------------------
+
+    /// Pressing the hotkey again while the dialog is up captures the
+    /// dialog itself — on Windows, our own window. That must not replace
+    /// the window the dialog was opened for, or the paste goes into our
+    /// hidden dialog.
+    #[test]
+    fn a_hotkey_press_while_the_dialog_is_up_keeps_the_original_target() {
+        let editor = ForegroundToken::from_raw(0x1001);
+        let our_dialog = ForegroundToken::from_raw(0x2002);
+        assert_eq!(next_dialog_target(true, editor, our_dialog), editor);
+        assert_eq!(
+            next_dialog_target(true, editor, ForegroundToken::default()),
+            editor
+        );
+    }
+
+    #[test]
+    fn opening_the_dialog_takes_the_newly_captured_target() {
+        let old = ForegroundToken::from_raw(0x1001);
+        let new = ForegroundToken::from_raw(0x3003);
+        assert_eq!(next_dialog_target(false, old, new), new);
+        assert_eq!(
+            next_dialog_target(false, old, ForegroundToken::default()),
+            ForegroundToken::default(),
+            "a fresh open from the tray has no target, whatever came before"
+        );
     }
 
     // ---- paste method combobox -------------------------------------------
