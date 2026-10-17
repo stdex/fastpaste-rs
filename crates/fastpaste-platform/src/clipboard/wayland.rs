@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use wl_clipboard_watch::{Config as WatchConfig, Event as WatchEvent, Transfer, Watcher};
 
-use super::{Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, SuppressList};
+use super::{
+    Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, ImageSnapshot, Read,
+    SuppressList,
+};
 use crate::take_once::TakeOnceChannel;
 
 /// Polling interval for the legacy fallback loop (no data-control
@@ -329,29 +332,189 @@ impl Clipboard for ArboardClipboard {
         self.suppress.arm(text);
     }
 
+    /// One MIME listing decides which single read to make. Without the
+    /// data-control protocol (an X11 session) nothing can be listed: files
+    /// and text are tried through arboard, and an image is not saved.
     fn snapshot(&self) -> ClipboardSnapshot {
         let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        super::arboard_snapshot(&mut clip, offers_any_format)
+        let clip = std::cell::RefCell::new(&mut *clip);
+        let files = || Read::from_arboard(clip.borrow_mut().get().file_list());
+        let text = || Read::from_arboard(clip.borrow_mut().get_text());
+        match list_mime_types() {
+            Listing::Empty => ClipboardSnapshot::Empty,
+            Listing::Offered(mimes) => {
+                let offer = offer_from_mimes(mimes.iter().map(String::as_str));
+                super::snapshot_in_order(
+                    || if offer.files { files() } else { Read::Absent },
+                    || if offer.text { text() } else { Read::Absent },
+                    || offer.image.as_deref().map_or(Read::Absent, read_image),
+                    || Some(offer.any),
+                )
+            }
+            Listing::Unavailable => super::snapshot_in_order(files, text, || Read::Absent, || None),
+        }
     }
 
     fn restore(&self, snapshot: &ClipboardSnapshot) -> Result<(), ClipboardError> {
         let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        super::arboard_restore(&mut clip, snapshot)
+        super::arboard_restore(&mut clip, snapshot, write_image)
     }
 }
 
-/// Whether the clipboard offers anything at all, through the data-control
-/// protocol. `None` without it (an X11 session, or a compositor that
-/// lacks it): there is then no way to tell an empty clipboard from one
-/// holding a format arboard cannot read.
-fn offers_any_format() -> Option<bool> {
+/// The clipboard's offered MIME types, sorted so a choice among them is
+/// deterministic.
+enum Listing {
+    Offered(Vec<String>),
+    Empty,
+    /// No data-control protocol: there is no way to tell an empty
+    /// clipboard from one holding a format we cannot read.
+    Unavailable,
+}
+
+fn list_mime_types() -> Listing {
     use wl_clipboard_rs::paste::{ClipboardType, Error, Seat, get_mime_types};
     match get_mime_types(ClipboardType::Regular, Seat::Unspecified) {
-        Ok(types) => Some(!types.is_empty()),
-        Err(Error::ClipboardEmpty) => Some(false),
+        Ok(types) if types.is_empty() => Listing::Empty,
+        Ok(types) => {
+            let mut types: Vec<String> = types.into_iter().collect();
+            types.sort();
+            Listing::Offered(types)
+        }
+        Err(Error::ClipboardEmpty) => Listing::Empty,
         Err(e) => {
             tracing::debug!("could not list clipboard formats: {e}");
-            None
+            Listing::Unavailable
         }
+    }
+}
+
+/// What a MIME listing says is on the clipboard.
+#[derive(Debug, Default)]
+struct Offer {
+    files: bool,
+    text: bool,
+    /// The image type to save: PNG if offered, else the first image type.
+    image: Option<String>,
+    any: bool,
+}
+
+fn offer_from_mimes<'a>(mimes: impl IntoIterator<Item = &'a str>) -> Offer {
+    let mut offer = Offer::default();
+    let mut images: Vec<&str> = Vec::new();
+    for mime in mimes {
+        offer.any = true;
+        offer.files |= mime == "text/uri-list";
+        offer.text |=
+            mime.starts_with("text/plain") || matches!(mime, "UTF8_STRING" | "STRING" | "TEXT");
+        if mime.starts_with("image/") {
+            images.push(mime);
+        }
+    }
+    images.sort_unstable();
+    offer.image = images
+        .iter()
+        .find(|m| **m == "image/png")
+        .or(images.first())
+        .map(|m| (*m).to_owned());
+    offer
+}
+
+/// Read one image type's bytes as offered, without decoding them.
+fn read_image(mime: &str) -> Read<ImageSnapshot> {
+    use std::io::Read as _;
+    use wl_clipboard_rs::paste::{ClipboardType, Error, MimeType, Seat, get_contents};
+    match get_contents(
+        ClipboardType::Regular,
+        Seat::Unspecified,
+        MimeType::Specific(mime),
+    ) {
+        Ok((mut pipe, offered)) => {
+            let mut bytes = Vec::new();
+            match pipe.read_to_end(&mut bytes) {
+                Ok(_) => Read::Got(ImageSnapshot {
+                    formats: vec![(offered, bytes)],
+                }),
+                Err(e) => Read::Failed(e.to_string()),
+            }
+        }
+        Err(Error::ClipboardEmpty | Error::NoMimeType) => Read::Absent,
+        Err(e) => Read::Failed(e.to_string()),
+    }
+}
+
+/// Offer the saved bytes again under their own MIME types. Served from a
+/// background thread until something else is copied, as arboard does.
+fn write_image(image: &ImageSnapshot) -> Result<(), ClipboardError> {
+    use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, Source};
+    let sources = image
+        .formats
+        .iter()
+        .map(|(mime, bytes)| MimeSource {
+            source: Source::Bytes(bytes.clone().into_boxed_slice()),
+            mime_type: MimeType::Specific(mime.clone()),
+        })
+        .collect();
+    Options::new()
+        .copy_multi(sources)
+        .map_err(|e| ClipboardError::Access(Box::new(e)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn offer(mimes: &[&str]) -> Offer {
+        offer_from_mimes(mimes.iter().copied())
+    }
+
+    /// One MIME listing decides which single read the snapshot makes,
+    /// instead of trying text, image and files in turn (a round trip
+    /// each) before even asking what is there.
+    #[test]
+    fn a_file_copy_offers_files_and_text() {
+        let o = offer(&[
+            "text/uri-list",
+            "text/plain;charset=utf-8",
+            "x-special/gnome-copied-files",
+        ]);
+        assert!(o.files && o.text && o.any);
+        assert_eq!(o.image, None);
+    }
+
+    #[test]
+    fn png_is_preferred_among_image_types() {
+        let o = offer(&["image/jpeg", "image/png", "image/webp", "text/html"]);
+        assert_eq!(o.image.as_deref(), Some("image/png"));
+        assert!(!o.text && !o.files);
+    }
+
+    #[test]
+    fn another_image_type_is_taken_when_there_is_no_png() {
+        assert_eq!(offer(&["image/webp"]).image.as_deref(), Some("image/webp"));
+        assert_eq!(
+            offer(&["image/webp", "image/bmp"]).image.as_deref(),
+            Some("image/bmp"),
+            "deterministic: the listing is a set, so pick by name"
+        );
+    }
+
+    #[test]
+    fn every_text_spelling_counts_as_text() {
+        for m in [
+            "text/plain",
+            "text/plain;charset=utf-8",
+            "UTF8_STRING",
+            "STRING",
+            "TEXT",
+        ] {
+            assert!(offer(&[m]).text, "{m}");
+        }
+    }
+
+    #[test]
+    fn unknown_formats_are_something_and_nothing_is_nothing() {
+        let o = offer(&["application/x-kde-cutselection"]);
+        assert!(o.any && !o.files && !o.text && o.image.is_none());
+        assert!(!offer(&[]).any);
     }
 }

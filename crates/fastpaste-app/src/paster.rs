@@ -1210,9 +1210,7 @@ mod tests {
 
     fn an_image() -> ClipboardSnapshot {
         ClipboardSnapshot::Image(ImageSnapshot {
-            width: 2,
-            height: 1,
-            rgba: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            formats: vec![("image/png".into(), vec![0x89, b'P', b'N', b'G', 1, 2, 3])],
         })
     }
 

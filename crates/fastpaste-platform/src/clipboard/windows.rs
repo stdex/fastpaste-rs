@@ -26,7 +26,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     MSG, RegisterClassW, TranslateMessage, WM_CLIPBOARDUPDATE, WNDCLASSW,
 };
 
-use super::{Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, SuppressList};
+use super::{
+    Clipboard, ClipboardError, ClipboardPayload, ClipboardSnapshot, ImageSnapshot, Read,
+    SuppressList,
+};
 use crate::take_once::TakeOnceChannel;
 
 /// Clipboard read/write plus an event-driven change stream.
@@ -98,13 +101,96 @@ impl Clipboard for WindowsClipboard {
     fn snapshot(&self) -> ClipboardSnapshot {
         use windows_sys::Win32::System::DataExchange::CountClipboardFormats;
         let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        // SAFETY: no arguments; needs no open clipboard.
-        super::arboard_snapshot(&mut clip, || Some(unsafe { CountClipboardFormats() } > 0))
+        let clip = std::cell::RefCell::new(&mut *clip);
+        super::snapshot_in_order(
+            || Read::from_arboard(clip.borrow_mut().get().file_list()),
+            || Read::from_arboard(clip.borrow_mut().get_text()),
+            read_image,
+            // SAFETY: no arguments; needs no open clipboard.
+            || Some(unsafe { CountClipboardFormats() } > 0),
+        )
     }
 
     fn restore(&self, snapshot: &ClipboardSnapshot) -> Result<(), ClipboardError> {
         let mut clip = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        super::arboard_restore(&mut clip, snapshot)
+        super::arboard_restore(&mut clip, snapshot, write_image)
+    }
+}
+
+/// The clipboard formats an image is saved in, by name: `PNG` (registered
+/// by applications that offer it; keeps transparency) and one DIB. Windows
+/// synthesises CF_DIBV5, CF_DIB and CF_BITMAP from one another, so one DIB
+/// covers a bitmap from any source and brings the others back on restore.
+///
+/// Each entry lists the formats that can stand in for one another, best
+/// first; the first one present is saved.
+fn image_formats() -> Vec<Vec<u32>> {
+    use clipboard_win::formats::{CF_DIB, CF_DIBV5};
+    let mut formats = Vec::new();
+    if let Some(png) = clipboard_win::register_format("PNG") {
+        formats.push(vec![png.get()]);
+    }
+    formats.push(vec![CF_DIBV5, CF_DIB]);
+    formats
+}
+
+/// Copy the image formats' bytes off the clipboard, without decoding.
+fn read_image() -> Read<ImageSnapshot> {
+    use clipboard_win::raw::{get_vec, is_format_avail};
+    let _open = match clipboard_win::Clipboard::new_attempts(10) {
+        Ok(open) => open,
+        Err(e) => return Read::Failed(e.to_string()),
+    };
+    let mut saved = Vec::new();
+    for candidates in image_formats() {
+        let Some(id) = candidates.into_iter().find(|id| is_format_avail(*id)) else {
+            continue;
+        };
+        let mut bytes = Vec::new();
+        if let Err(e) = get_vec(id, &mut bytes) {
+            return Read::Failed(e.to_string());
+        }
+        saved.push((format_name(id), bytes));
+    }
+    if saved.is_empty() {
+        Read::Absent
+    } else {
+        Read::Got(ImageSnapshot { formats: saved })
+    }
+}
+
+/// Put saved image formats back exactly as they were read.
+fn write_image(image: &ImageSnapshot) -> Result<(), ClipboardError> {
+    use clipboard_win::raw::{empty, set_without_clear};
+    let access = |e: clipboard_win::ErrorCode| ClipboardError::Access(e.to_string().into());
+    let _open = clipboard_win::Clipboard::new_attempts(10).map_err(access)?;
+    empty().map_err(access)?;
+    for (name, bytes) in &image.formats {
+        if let Some(id) = format_id(name) {
+            set_without_clear(id, bytes).map_err(access)?;
+        }
+    }
+    Ok(())
+}
+
+/// The name an image format is saved under, and back. The registered PNG
+/// format's id differs between sessions; the name does not.
+fn format_name(id: u32) -> String {
+    use clipboard_win::formats::{CF_DIB, CF_DIBV5};
+    match id {
+        CF_DIBV5 => "CF_DIBV5".into(),
+        CF_DIB => "CF_DIB".into(),
+        _ => "PNG".into(),
+    }
+}
+
+fn format_id(name: &str) -> Option<u32> {
+    use clipboard_win::formats::{CF_DIB, CF_DIBV5};
+    match name {
+        "CF_DIBV5" => Some(CF_DIBV5),
+        "CF_DIB" => Some(CF_DIB),
+        "PNG" => clipboard_win::register_format("PNG").map(|id| id.get()),
+        _ => None,
     }
 }
 

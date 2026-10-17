@@ -50,6 +50,10 @@ libc = "0.2"   # poll(2) for the hotkey reader's blocking loop
 x11rb = "0.13"
 
 [target.'cfg(windows)'.dependencies]
+# Raw clipboard formats, so an image is saved and put back as the bytes
+# it was offered in rather than decoded and re-encoded. Already built as
+# arboard's Windows backend.
+clipboard-win = { version = "5.4", features = ["std"] }
 # Win32 bindings: RegisterHotKey + a message pump for the hotkeys,
 # AddClipboardFormatListener for change notifications, SendInput for the
 # paste keystroke.

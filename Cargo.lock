@@ -1561,6 +1561,7 @@ name = "fastpaste-platform"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "clipboard-win",
  "evdev",
  "keyring",
  "libc",

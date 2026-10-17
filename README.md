@@ -375,7 +375,8 @@ are pinned in the crate that owns them.
 | `single-instance` | app | Single-instance guard: abstract unix socket keyed on the data dir (no lock file, kernel-released on exit) |
 | `arboard` (feature `wayland-data-control`) | platform | Clipboard read/write (text, and images and file lists for the paste snapshot): native data-control protocol on Wayland — the same transport as the watcher — with arboard's X11 backend as fallback when the compositor offers no data-control |
 | `wl-clipboard-watch` | platform | Event-driven clipboard change detection (ext/wlr-data-control); the platform layer falls back to arboard polling when neither protocol is available |
-| `wl-clipboard-rs` | platform | Listing the clipboard's offered MIME types, so a paste snapshot can tell an empty clipboard from one holding a format it cannot save. Already built as arboard's data-control backend |
+| `wl-clipboard-rs` | platform | The paste snapshot on Wayland: one MIME listing decides what to read, and an image is read and offered back as its raw bytes, never decoded. Already built as arboard's data-control backend |
+| `clipboard-win` | platform (Windows) | The paste snapshot of an image: its PNG / DIB clipboard formats copied and put back as raw bytes. Already built as arboard's Windows backend |
 | `evdev` | platform | `/dev/uinput` virtual keyboard to emit Ctrl+V / Shift+Insert; `KeyCode: FromStr` also resolves hotkey key names to physical kernel keycodes |
 | `x11rb` | platform | XGrabKey global hotkeys on XWayland — physical keycodes, layout-independent (the `global-hotkey` crate resolves keysyms via the core keymap and fails under Cyrillic layouts); `GetModifierMapping` resolves real Alt/NumLock/Super modifier bits |
 | `libc` | platform | `poll(2)` for the hotkey reader's blocking loop (wakes on X traffic or a wake-pipe byte); already a transitive dep of x11rb |

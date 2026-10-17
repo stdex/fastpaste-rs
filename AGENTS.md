@@ -73,7 +73,18 @@ cargo test --target x86_64-pc-windows-gnu -p fastpaste-platform --lib --no-run
 env -u DISPLAY -u WAYLAND_DISPLAY wine target/x86_64-pc-windows-gnu/debug/deps/fastpaste_platform-*.exe
 ```
 
-That runs the `#[cfg(windows)]` unit tests. A small program linking
+That runs the `#[cfg(windows)]` unit tests.
+
+The Wayland clipboard can be exercised the same way without touching the
+desktop you are working in: a headless KWin on its own socket and its own
+D-Bus session,
+
+```
+dbus-run-session -- kwin_wayland --virtual --socket fp-test &
+WAYLAND_DISPLAY=fp-test cargo run ...
+```
+
+has a data-control protocol and a clipboard of its own. A small program linking
 `fastpaste-app` can also drive the real `Paster` into an EDIT control
 and observe what arrives — which is how the paste-sequence findings in
 the history were measured. Wine is not Windows: it has no integrity
@@ -357,6 +368,12 @@ device.
   someone else wrote the clipboard meanwhile.
 - **arboard's Windows file-list setter does not empty the clipboard,**
   unlike its text and image setters. Restoring a file list clears first.
+- **The paste snapshot never decodes an image.** Through arboard a
+  4000x3000 screenshot cost about a second to snapshot and eight to
+  restore (debug build), while the paste held its sequence. It is saved
+  as the bytes it was offered in — `PNG` / a DIB on Windows, the offered
+  `image/*` MIME on Wayland — and offered back unchanged. Files are read
+  before text, because file managers offer the paths as text too.
 - **`WM_CLIPBOARDUPDATE` is posted, not sent.** The listener's pump must
   `DispatchMessageW`; handing it to `DefWindowProcW` drops every
   notification.

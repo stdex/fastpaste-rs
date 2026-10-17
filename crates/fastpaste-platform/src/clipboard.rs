@@ -65,26 +65,29 @@ pub struct ClipboardPayload {
     pub source_process: String,
 }
 
-/// Pixels taken off the clipboard: RGBA, row-major, 8 bits per channel —
-/// arboard's own representation, kept in a type of ours so callers do not
-/// depend on the backend crate.
+/// An image as the clipboard held it: each format the backend saved — a
+/// Windows clipboard format name such as `PNG` or `CF_DIBV5`, or a MIME
+/// type — with its bytes untouched.
+///
+/// Nothing is decoded on the way in or re-encoded on the way back. Doing
+/// that through arboard cost a second to snapshot and eight to restore a
+/// 4000x3000 screenshot, all while the paste held its sequence.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ImageSnapshot {
-    pub width: usize,
-    pub height: usize,
-    pub rgba: Vec<u8>,
+    pub formats: Vec<(String, Vec<u8>)>,
 }
 
 impl std::fmt::Debug for ImageSnapshot {
-    /// Dimensions only: a screenshot is megabytes of pixels.
+    /// Formats and sizes only: a screenshot is megabytes.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "ImageSnapshot({}x{}, {} bytes)",
-            self.width,
-            self.height,
-            self.rgba.len()
-        )
+        f.write_str("ImageSnapshot[")?;
+        for (i, (name, bytes)) in self.formats.iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            write!(f, "{name}: {} bytes", bytes.len())?;
+        }
+        f.write_str("]")
     }
 }
 
@@ -121,17 +124,6 @@ enum Read<T> {
     Got(T),
     Absent,
     Failed(String),
-}
-
-impl<T> Read<T> {
-    #[cfg(any(target_os = "linux", windows))]
-    fn map<U>(self, f: impl FnOnce(T) -> U) -> Read<U> {
-        match self {
-            Read::Got(value) => Read::Got(f(value)),
-            Read::Absent => Read::Absent,
-            Read::Failed(e) => Read::Failed(e),
-        }
-    }
 }
 
 #[cfg(any(target_os = "linux", windows))]
@@ -181,39 +173,17 @@ fn snapshot_in_order(
     unrepresentable(has_other_formats())
 }
 
-/// [`snapshot_in_order`] with every read through arboard.
-#[cfg(any(target_os = "linux", windows))]
-fn arboard_snapshot(
-    clip: &mut arboard::Clipboard,
-    has_other_formats: impl FnOnce() -> Option<bool>,
-) -> ClipboardSnapshot {
-    let clip = std::cell::RefCell::new(clip);
-    snapshot_in_order(
-        || Read::from_arboard(clip.borrow_mut().get().file_list()),
-        || Read::from_arboard(clip.borrow_mut().get_text()),
-        || {
-            Read::from_arboard(clip.borrow_mut().get_image()).map(|image| ImageSnapshot {
-                width: image.width,
-                height: image.height,
-                rgba: image.bytes.into_owned(),
-            })
-        },
-        has_other_formats,
-    )
-}
-
+/// Put a snapshot back through arboard, except an image, which the
+/// backend writes raw with `write_image`.
 #[cfg(any(target_os = "linux", windows))]
 fn arboard_restore(
     clip: &mut arboard::Clipboard,
     snapshot: &ClipboardSnapshot,
+    write_image: impl FnOnce(&ImageSnapshot) -> Result<(), ClipboardError>,
 ) -> Result<(), ClipboardError> {
     let result = match snapshot {
         ClipboardSnapshot::Text(text) => clip.set_text(text.clone()),
-        ClipboardSnapshot::Image(image) => clip.set_image(arboard::ImageData {
-            width: image.width,
-            height: image.height,
-            bytes: std::borrow::Cow::Borrowed(&image.rgba),
-        }),
+        ClipboardSnapshot::Image(image) => return write_image(image),
         // arboard's text and image setters empty the clipboard first; its
         // Windows file-list setter does not, so whatever was there — our
         // payload, after a paste — would stay alongside the files.
@@ -488,9 +458,7 @@ mod tests {
         assert_eq!(*clip.written.lock().unwrap(), vec!["back"]);
 
         let image = ClipboardSnapshot::Image(ImageSnapshot {
-            width: 1,
-            height: 1,
-            rgba: vec![0, 0, 0, 255],
+            formats: vec![("image/png".into(), vec![0x89, b'P', b'N', b'G'])],
         });
         assert!(clip.restore(&image).is_err());
         assert!(clip.restore(&ClipboardSnapshot::Unsupported).is_err());
@@ -580,15 +548,20 @@ mod tests {
         assert_eq!(snap, ClipboardSnapshot::Unsupported);
     }
 
+    /// An image is kept as the clipboard held it — each format with its
+    /// bytes, nothing decoded — and logging one shows formats and sizes,
+    /// never megabytes of data.
     #[test]
-    fn image_debug_does_not_dump_the_pixels() {
+    fn image_debug_lists_formats_not_bytes() {
         let image = ImageSnapshot {
-            width: 2,
-            height: 1,
-            rgba: vec![7; 8],
+            formats: vec![
+                ("PNG".into(), vec![7; 10]),
+                ("CF_DIBV5".into(), vec![7; 2048]),
+            ],
         };
         let shown = format!("{image:?}");
-        assert!(shown.contains("2x1"), "{shown}");
+        assert!(shown.contains("PNG: 10 bytes"), "{shown}");
+        assert!(shown.contains("CF_DIBV5: 2048 bytes"), "{shown}");
         assert!(!shown.contains("7, 7"), "{shown}");
     }
 
