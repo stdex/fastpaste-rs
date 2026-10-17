@@ -137,7 +137,6 @@ impl Paster {
         };
 
         let cfg = *self.config.lock().unwrap_or_else(|e| e.into_inner());
-        let delay_ms = cfg.delay_ms;
         let restore = cfg.restore_clipboard;
 
         // Snapshot BEFORE overwriting. `Empty` is not a failure — there
@@ -167,7 +166,7 @@ impl Paster {
         // move it from here is somebody else's.
         let seq_after_payload = self.clipboard.sequence();
         let outcome = match written {
-            Ok(()) => self.emit_paste(delay_ms, target),
+            Ok(()) => self.emit_paste(&cfg, target),
             Err(e) => Err(PasteError::from(e)),
         };
 
@@ -255,10 +254,10 @@ impl Paster {
         }
     }
 
-    /// Give the target focus back, wait out the settle delay and emit
-    /// Ctrl+V. `Ok(false)` means there was no device to emit through — a
+    /// Give the target focus back, wait out the settle delay and emit the
+    /// paste chord. `Ok(false)` means there was no device to emit through — a
     /// clean degrade, not an error.
-    fn emit_paste(&self, delay_ms: u64, target: &ForegroundToken) -> Result<bool, PasteError> {
+    fn emit_paste(&self, cfg: &PasteConfig, target: &ForegroundToken) -> Result<bool, PasteError> {
         // Check for a device BEFORE the settle delay: with the null
         // backend the sleep buys nothing and only holds the sequence
         // guard (for up to 5s at the configured maximum).
@@ -271,10 +270,10 @@ impl Paster {
         if target.raw().is_some() && !self.foreground.restore(target) {
             tracing::warn!("could not give focus back to the target window");
         }
-        if delay_ms > 0 {
-            std::thread::sleep(Duration::from_millis(delay_ms));
+        if cfg.delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(cfg.delay_ms));
         }
-        self.uinput.send_ctrl_v()?;
+        self.uinput.send_paste(cfg.method)?;
         Ok(true)
     }
 }
@@ -302,7 +301,7 @@ mod tests {
         }
     }
 
-    /// A PasteKeys impl that counts `send_ctrl_v` calls, and can be
+    /// A PasteKeys impl that counts `send_paste` calls, and can be
     /// told to fail the way a revoked or dead device does.
     struct CountingUinput {
         count: Mutex<u32>,
@@ -341,7 +340,10 @@ mod tests {
         fn available(&self) -> bool {
             self.available
         }
-        fn send_ctrl_v(&self) -> Result<(), fastpaste_platform::PasteKeyError> {
+        fn send_paste(
+            &self,
+            _method: PasteMethod,
+        ) -> Result<(), fastpaste_platform::PasteKeyError> {
             *self.count.lock().unwrap() += 1;
             if self.fail {
                 return Err(fastpaste_platform::PasteKeyError::Poisoned);
@@ -366,7 +368,7 @@ mod tests {
         let paster = Paster::new(clip.clone(), uinput.clone(), cfg(0, /*restore=*/ true));
         paster.paste_text("payload").unwrap();
 
-        assert_eq!(uinput.calls(), 1, "send_ctrl_v must fire exactly once");
+        assert_eq!(uinput.calls(), 1, "send_paste must fire exactly once");
         // After paste with restore=true, the clipboard must hold the snapshot.
         assert_eq!(clip.text().unwrap(), "orig");
     }
@@ -394,7 +396,7 @@ mod tests {
         assert_eq!(
             uinput.calls(),
             0,
-            "must NOT fire send_ctrl_v when unavailable"
+            "must NOT fire send_paste when unavailable"
         );
         assert_eq!(
             clip.text().unwrap(),
@@ -890,7 +892,10 @@ mod tests {
         fn available(&self) -> bool {
             true
         }
-        fn send_ctrl_v(&self) -> Result<(), fastpaste_platform::PasteKeyError> {
+        fn send_paste(
+            &self,
+            _method: PasteMethod,
+        ) -> Result<(), fastpaste_platform::PasteKeyError> {
             self.sent_at.lock().unwrap().push(Instant::now());
             (self.on_send)();
             Ok(())

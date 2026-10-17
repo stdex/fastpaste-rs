@@ -66,25 +66,43 @@ pub trait PasteKeys: Send + Sync {
     ///
     /// It says nothing about the device's current *health*: a device that
     /// was created successfully and has since died still reports `true`,
-    /// and [`Self::send_ctrl_v`] is what surfaces that. Callers must treat
-    /// an `Err` from `send_ctrl_v` as "the keystroke did not happen", the
+    /// and [`Self::send_paste`] is what surfaces that. Callers must treat
+    /// an `Err` from `send_paste` as "the keystroke did not happen", the
     /// same way they treat `available() == false`.
     fn available(&self) -> bool;
-    fn send_ctrl_v(&self) -> Result<(), PasteKeyError>;
+    /// Press and release the chord for `method`.
+    fn send_paste(&self, method: PasteMethod) -> Result<(), PasteKeyError>;
 }
 
-/// The key transitions that make up one Ctrl+V, in order.
+// ---------------------------------------------------------------------------
+// Linux — /dev/uinput
+// ---------------------------------------------------------------------------
+
+/// Every key [`paste_frames`] can emit. The virtual device declares
+/// exactly these: a narrower capability set keeps the device report small
+/// and avoids the huge keymaps some compositors handle poorly, and a key
+/// outside it would be silently dropped by the kernel.
+#[cfg(target_os = "linux")]
+const DEVICE_KEYS: [KeyCode; 2] = [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V];
+
+/// The key transitions that make up one paste chord, in order.
 ///
 /// Split out from the emit loop purely so it can be asserted in a test —
 /// press/release ordering is the kind of thing that silently regresses
 /// into a stuck modifier, and `/dev/uinput` is unavailable in CI.
+///
+/// These are *physical* keys: the compositor maps them through the
+/// user's layout, so on a layout that moves V the chord moves with it.
 #[cfg(target_os = "linux")]
-fn ctrl_v_frames() -> [(KeyCode, bool); 4] {
-    [
-        (KeyCode::KEY_LEFTCTRL, true),
-        (KeyCode::KEY_V, true),
-        (KeyCode::KEY_V, false),
-        (KeyCode::KEY_LEFTCTRL, false),
+fn paste_frames(method: PasteMethod) -> Vec<(KeyCode, bool)> {
+    let (modifier, key) = match method {
+        PasteMethod::CtrlV => (KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V),
+    };
+    vec![
+        (modifier, true),
+        (key, true),
+        (key, false),
+        (modifier, false),
     ]
 }
 
@@ -98,12 +116,10 @@ pub struct EvdevPasteKeys {
 #[cfg(target_os = "linux")]
 impl EvdevPasteKeys {
     pub fn new() -> Result<Self, PasteKeyError> {
-        // Only the keys `send_ctrl_v` ever emits. A narrower capability set
-        // keeps the device report small and avoids the huge keymaps some
-        // compositors handle poorly.
         let mut keys = AttributeSet::<KeyCode>::new();
-        keys.insert(KeyCode::KEY_LEFTCTRL);
-        keys.insert(KeyCode::KEY_V);
+        for key in DEVICE_KEYS {
+            keys.insert(key);
+        }
         let device = VirtualDevice::builder()
             .map_err(PasteKeyError::Open)?
             .name("fastpaste virtual keyboard")
@@ -131,8 +147,7 @@ impl EvdevPasteKeys {
         dev.emit(&events).map_err(PasteKeyError::Emit)
     }
 
-    fn press_ctrl_v(&self) -> Result<(), PasteKeyError> {
-        let frames = ctrl_v_frames();
+    fn press(&self, frames: &[(KeyCode, bool)]) -> Result<(), PasteKeyError> {
         for (i, (key, press)) in frames.iter().enumerate() {
             self.emit_key(*key, *press)?;
             if i + 1 < frames.len() {
@@ -149,14 +164,17 @@ impl PasteKeys for EvdevPasteKeys {
         true
     }
 
-    fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
-        let result = self.press_ctrl_v();
+    fn send_paste(&self, method: PasteMethod) -> Result<(), PasteKeyError> {
+        let frames = paste_frames(method);
+        let result = self.press(&frames);
         if result.is_err() {
             // Never leave keys logically held on the virtual device — a
-            // failed emit mid-sequence would keep Ctrl stuck down for every
-            // later interaction with the compositor.
-            let _ = self.emit_key(KeyCode::KEY_V, false);
-            let _ = self.emit_key(KeyCode::KEY_LEFTCTRL, false);
+            // failed emit mid-sequence would keep a modifier stuck down
+            // for every later interaction with the compositor. Release
+            // in reverse press order, so the modifier goes last.
+            for (key, _) in frames.iter().filter(|(_, press)| *press).rev() {
+                let _ = self.emit_key(*key, false);
+            }
         }
         result
     }
@@ -166,7 +184,73 @@ impl PasteKeys for EvdevPasteKeys {
 // Windows — SendInput
 // ---------------------------------------------------------------------------
 
-/// Synthesises Ctrl+V with `SendInput`.
+/// Windows virtual-key codes, as plain numbers so the stroke builder
+/// compiles — and is tested — on every platform.
+#[cfg(any(windows, test))]
+mod vk {
+    pub const CONTROL: u16 = 0x11;
+    pub const V: u16 = 0x56;
+}
+
+/// One key transition for `SendInput`, before it becomes an `INPUT`.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyStroke {
+    vk: u16,
+    scan: u16,
+    up: bool,
+    extended: bool,
+}
+
+/// The US set-1 scan code for a virtual key, for when the active layout
+/// gives none: a zero scan code is what RDP and raw-input readers drop.
+#[cfg(any(windows, test))]
+fn us_scan_code(key: u16) -> u16 {
+    match key {
+        vk::CONTROL => 0x1D,
+        vk::V => 0x2F,
+        _ => 0,
+    }
+}
+
+/// The strokes for one paste chord, in order, each carrying the scan code
+/// `scan_of` (the layout's VK -> scan lookup) gives it.
+///
+/// Both the virtual key and the scan code are sent, as the reference
+/// implementation does: applications keep matching on the virtual key,
+/// while RDP, VMs and raw-input readers get the scan code they need
+/// instead of zero.
+#[cfg(any(windows, test))]
+fn windows_paste_inputs(method: PasteMethod, scan_of: impl Fn(u16) -> u16) -> Vec<KeyStroke> {
+    let stroke = |key: u16, up: bool| KeyStroke {
+        vk: key,
+        scan: match scan_of(key) {
+            0 => us_scan_code(key),
+            scan => scan,
+        },
+        up,
+        extended: false,
+    };
+    let (modifier, key) = match method {
+        PasteMethod::CtrlV => (vk::CONTROL, vk::V),
+    };
+    vec![
+        stroke(modifier, false),
+        stroke(key, false),
+        stroke(key, true),
+        stroke(modifier, true),
+    ]
+}
+
+/// The active layout's scan code for a virtual key, or 0 if it has none.
+#[cfg(windows)]
+fn windows_scan_code(key: u16) -> u16 {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{MAPVK_VK_TO_VSC, MapVirtualKeyW};
+    // SAFETY: a pure table lookup; any input is valid.
+    unsafe { MapVirtualKeyW(u32::from(key), MAPVK_VK_TO_VSC) as u16 }
+}
+
+/// Synthesises the paste chord with `SendInput`.
 ///
 /// Simpler than the Linux path in every way that matters: no device to
 /// create, no permissions to arrange, and no settle delay — the events
@@ -198,20 +282,27 @@ impl PasteKeys for WindowsPasteKeys {
         true
     }
 
-    fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
+    fn send_paste(&self, method: PasteMethod) -> Result<(), PasteKeyError> {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput, VIRTUAL_KEY,
-            VK_CONTROL, VK_V,
+            INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+            SendInput,
         };
 
-        fn key(vk: VIRTUAL_KEY, up: bool) -> INPUT {
+        fn input(k: &KeyStroke) -> INPUT {
+            let mut flags = 0;
+            if k.up {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            if k.extended {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
             INPUT {
                 r#type: INPUT_KEYBOARD,
                 Anonymous: INPUT_0 {
                     ki: KEYBDINPUT {
-                        wVk: vk,
-                        wScan: 0,
-                        dwFlags: if up { KEYEVENTF_KEYUP } else { 0 },
+                        wVk: k.vk,
+                        wScan: k.scan,
+                        dwFlags: flags,
                         time: 0,
                         dwExtraInfo: 0,
                     },
@@ -219,36 +310,39 @@ impl PasteKeys for WindowsPasteKeys {
             }
         }
 
-        // One call, so the four events cannot be interleaved with real
-        // input from the user's keyboard. Ctrl brackets V, and every
-        // press has its release — a stuck Ctrl is the nastiest failure
-        // this module can produce.
-        let inputs = [
-            key(VK_CONTROL, false),
-            key(VK_V, false),
-            key(VK_V, true),
-            key(VK_CONTROL, true),
-        ];
+        fn send(inputs: &[INPUT]) -> u32 {
+            // SAFETY: `inputs` is a live, correctly-sized slice of
+            // initialised `INPUT` values, and the size argument matches
+            // `INPUT`'s layout as the API requires.
+            unsafe {
+                SendInput(
+                    inputs.len() as u32,
+                    inputs.as_ptr(),
+                    size_of::<INPUT>() as i32,
+                )
+            }
+        }
 
-        // SAFETY: `inputs` is a live, correctly-sized array of
-        // initialised `INPUT` values owned by this stack frame, and the
-        // size argument matches `INPUT`'s layout as the API requires.
-        let sent = unsafe {
-            SendInput(
-                inputs.len() as u32,
-                inputs.as_ptr(),
-                size_of::<INPUT>() as i32,
-            )
-        };
+        // One call, so the events cannot be interleaved with real input
+        // from the user's keyboard. The modifier brackets the key, and
+        // every press has its release — a stuck modifier is the nastiest
+        // failure this module can produce.
+        let strokes = windows_paste_inputs(method, windows_scan_code);
+        let inputs: Vec<INPUT> = strokes.iter().map(input).collect();
+        let sent = send(&inputs);
 
         if sent as usize != inputs.len() {
             // Blocked partway — most often UIPI: a window running at a
             // higher integrity level has the foreground and the OS
-            // refuses synthetic input to it. Release the modifier so the
-            // user is not left with a stuck Ctrl.
-            let release = [key(VK_CONTROL, true)];
-            // SAFETY: as above.
-            unsafe { SendInput(1, release.as_ptr(), size_of::<INPUT>() as i32) };
+            // refuses synthetic input to it. Release what was pressed so
+            // the user is not left with a stuck modifier.
+            let releases: Vec<INPUT> = strokes
+                .iter()
+                .filter(|k| !k.up)
+                .rev()
+                .map(|k| input(&KeyStroke { up: true, ..*k }))
+                .collect();
+            send(&releases);
             return Err(PasteKeyError::Rejected {
                 sent,
                 expected: inputs.len() as u32,
@@ -263,7 +357,7 @@ impl PasteKeys for NullPasteKeys {
     fn available(&self) -> bool {
         false
     }
-    fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
+    fn send_paste(&self, _method: PasteMethod) -> Result<(), PasteKeyError> {
         Ok(())
     }
 }
@@ -293,8 +387,88 @@ mod tests {
     fn null_reports_unavailable_and_no_ops() {
         let n = NullPasteKeys;
         assert!(!n.available());
-        n.send_ctrl_v().unwrap(); // does nothing, but doesn't error
+        n.send_paste(PasteMethod::CtrlV).unwrap(); // does nothing, but doesn't error
     }
+
+    // ---- Windows builder (pure, so it is tested on every platform) -----
+
+    /// A layout's VK -> scan table, standing in for `MapVirtualKeyW`.
+    /// Deliberately not the US set-1 values, so a test can tell a looked-up
+    /// scan code from the fallback.
+    fn fake_layout(vk: u16) -> u16 {
+        match vk {
+            vk::CONTROL => 0x61,
+            vk::V => 0x62,
+            _ => 0,
+        }
+    }
+
+    /// Finding 6. `wScan = 0` is ignored by RDP, VMs and raw-input
+    /// readers, which then see no key at all. Every stroke carries the
+    /// scan code the current layout gives its virtual key.
+    #[test]
+    fn ctrl_v_inputs_carry_scancodes() {
+        let strokes = windows_paste_inputs(PasteMethod::CtrlV, fake_layout);
+        assert_eq!(
+            strokes,
+            vec![
+                KeyStroke {
+                    vk: vk::CONTROL,
+                    scan: 0x61,
+                    up: false,
+                    extended: false
+                },
+                KeyStroke {
+                    vk: vk::V,
+                    scan: 0x62,
+                    up: false,
+                    extended: false
+                },
+                KeyStroke {
+                    vk: vk::V,
+                    scan: 0x62,
+                    up: true,
+                    extended: false
+                },
+                KeyStroke {
+                    vk: vk::CONTROL,
+                    scan: 0x61,
+                    up: true,
+                    extended: false
+                },
+            ]
+        );
+    }
+
+    /// A layout with no mapping for a key must not bring `wScan = 0`
+    /// back: fall back to the US set-1 code for the same key.
+    #[test]
+    fn scan_codes_fall_back_when_the_layout_has_no_mapping() {
+        let strokes = windows_paste_inputs(PasteMethod::CtrlV, |_| 0);
+        assert!(strokes.iter().all(|k| k.scan != 0), "{strokes:?}");
+        assert_eq!(strokes[0].scan, 0x1D, "Ctrl");
+        assert_eq!(strokes[1].scan, 0x2F, "V");
+    }
+
+    #[test]
+    fn windows_strokes_release_every_press() {
+        let strokes = windows_paste_inputs(PasteMethod::CtrlV, fake_layout);
+        for key in [vk::CONTROL, vk::V] {
+            let downs = strokes.iter().filter(|k| k.vk == key && !k.up).count();
+            let ups = strokes.iter().filter(|k| k.vk == key && k.up).count();
+            assert_eq!(downs, ups, "{key:#x} must not be left held");
+        }
+    }
+
+    /// The real lookup, where it exists.
+    #[cfg(windows)]
+    #[test]
+    fn map_vk_gives_v_a_scan_code() {
+        assert_ne!(windows_scan_code(vk::V), 0);
+        assert_ne!(windows_scan_code(vk::CONTROL), 0);
+    }
+
+    // ---- Linux frames ---------------------------------------------------
 
     /// A stuck Ctrl is the nastiest failure this module can produce, so
     /// pin the exact transition order: every press is matched by a
@@ -302,30 +476,25 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn ctrl_v_frames_press_and_release_in_order() {
-        let frames = ctrl_v_frames();
+        let frames = paste_frames(PasteMethod::CtrlV);
         assert_eq!(
             frames,
-            [
+            vec![
                 (KeyCode::KEY_LEFTCTRL, true),
                 (KeyCode::KEY_V, true),
                 (KeyCode::KEY_V, false),
                 (KeyCode::KEY_LEFTCTRL, false),
             ]
         );
-
-        // Ctrl is held for the whole of V's press and release.
-        let pos = |needle: (KeyCode, bool)| frames.iter().position(|f| *f == needle).unwrap();
-        assert!(pos((KeyCode::KEY_LEFTCTRL, true)) < pos((KeyCode::KEY_V, true)));
-        assert!(pos((KeyCode::KEY_V, false)) < pos((KeyCode::KEY_LEFTCTRL, false)));
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn every_pressed_key_is_released() {
-        let frames = ctrl_v_frames();
-        for key in [KeyCode::KEY_LEFTCTRL, KeyCode::KEY_V] {
-            let presses = frames.iter().filter(|(k, p)| *k == key && *p).count();
-            let releases = frames.iter().filter(|(k, p)| *k == key && !*p).count();
+        let frames = paste_frames(PasteMethod::CtrlV);
+        for (key, _) in &frames {
+            let presses = frames.iter().filter(|(k, p)| k == key && *p).count();
+            let releases = frames.iter().filter(|(k, p)| k == key && !*p).count();
             assert_eq!(presses, releases, "{key:?} must not be left held");
         }
     }
@@ -335,9 +504,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn frames_only_use_declared_keys() {
-        for (key, _) in ctrl_v_frames() {
+        for (key, _) in paste_frames(PasteMethod::CtrlV) {
             assert!(
-                key == KeyCode::KEY_LEFTCTRL || key == KeyCode::KEY_V,
+                DEVICE_KEYS.contains(&key),
                 "{key:?} is not in the device's declared capability set"
             );
         }

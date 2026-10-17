@@ -620,7 +620,10 @@ mod tests {
             fn available(&self) -> bool {
                 true
             }
-            fn send_ctrl_v(&self) -> Result<(), PasteKeyError> {
+            fn send_paste(
+                &self,
+                _method: fastpaste_platform::PasteMethod,
+            ) -> Result<(), PasteKeyError> {
                 Ok(())
             }
         }
