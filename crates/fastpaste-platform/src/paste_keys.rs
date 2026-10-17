@@ -204,10 +204,12 @@ impl PasteKeys for EvdevPasteKeys {
 
 /// Windows virtual-key codes, as plain numbers so the stroke builder
 /// compiles — and is tested — on every platform.
+///
+/// Modifiers are always named by side, for the chord as for releasing a
+/// held key: `SendInput` with `VK_LCONTROL` still reaches applications as
+/// `VK_CONTROL` in `WM_KEYDOWN`, so one set serves both.
 #[cfg(any(windows, test))]
 mod vk {
-    pub const SHIFT: u16 = 0x10;
-    pub const CONTROL: u16 = 0x11;
     pub const INSERT: u16 = 0x2D;
     pub const V: u16 = 0x56;
     pub const LSHIFT: u16 = 0xA0;
@@ -301,9 +303,9 @@ struct KeyStroke {
 #[cfg(any(windows, test))]
 fn us_scan_code(key: u16) -> u16 {
     match key {
-        vk::CONTROL | vk::LCONTROL | vk::RCONTROL => 0x1D,
+        vk::LCONTROL | vk::RCONTROL => 0x1D,
         vk::V => 0x2F,
-        vk::SHIFT | vk::LSHIFT => 0x2A,
+        vk::LSHIFT => 0x2A,
         vk::INSERT => 0x52,
         vk::RSHIFT => 0x36,
         vk::LMENU | vk::RMENU => 0x38,
@@ -343,8 +345,8 @@ fn windows_paste_inputs(
         extended: is_extended(key),
     };
     let (chord_modifier, modifier, key) = match method {
-        PasteMethod::CtrlV => (ModMask::CTRL, vk::CONTROL, vk::V),
-        PasteMethod::ShiftInsert => (ModMask::SHIFT, vk::SHIFT, vk::INSERT),
+        PasteMethod::CtrlV => (ModMask::CTRL, vk::LCONTROL, vk::V),
+        PasteMethod::ShiftInsert => (ModMask::SHIFT, vk::LSHIFT, vk::INSERT),
     };
 
     let mut strokes = Vec::new();
@@ -543,7 +545,7 @@ mod tests {
     /// scan code from the fallback.
     fn fake_layout(vk: u16) -> u16 {
         match vk {
-            vk::CONTROL => 0x61,
+            vk::LCONTROL => 0x61,
             vk::V => 0x62,
             _ => 0,
         }
@@ -559,7 +561,7 @@ mod tests {
             strokes,
             vec![
                 KeyStroke {
-                    vk: vk::CONTROL,
+                    vk: vk::LCONTROL,
                     scan: 0x61,
                     up: false,
                     extended: false
@@ -577,7 +579,7 @@ mod tests {
                     extended: false
                 },
                 KeyStroke {
-                    vk: vk::CONTROL,
+                    vk: vk::LCONTROL,
                     scan: 0x61,
                     up: true,
                     extended: false
@@ -599,7 +601,7 @@ mod tests {
     #[test]
     fn windows_strokes_release_every_press() {
         let strokes = windows_paste_inputs(PasteMethod::CtrlV, ModMask::NONE, fake_layout);
-        for key in [vk::CONTROL, vk::V] {
+        for key in [vk::LCONTROL, vk::V] {
             let downs = strokes.iter().filter(|k| k.vk == key && !k.up).count();
             let ups = strokes.iter().filter(|k| k.vk == key && k.up).count();
             assert_eq!(downs, ups, "{key:#x} must not be left held");
@@ -619,7 +621,7 @@ mod tests {
         );
         let first_ctrl_down = strokes
             .iter()
-            .position(|k| k.vk == vk::CONTROL && !k.up)
+            .position(|k| k.vk == vk::LCONTROL && !k.up)
             .expect("the chord still presses Ctrl");
         for side in [vk::LMENU, vk::LSHIFT] {
             let up = strokes
@@ -642,10 +644,10 @@ mod tests {
         assert_eq!(
             core,
             vec![
-                (vk::CONTROL, false),
+                (vk::LCONTROL, false),
                 (vk::V, false),
                 (vk::V, true),
-                (vk::CONTROL, true)
+                (vk::LCONTROL, true)
             ]
         );
     }
@@ -660,7 +662,7 @@ mod tests {
             assert!(
                 !strokes
                     .iter()
-                    .any(|k| [vk::CONTROL, vk::LCONTROL, vk::RCONTROL].contains(&k.vk)),
+                    .any(|k| [vk::LCONTROL, vk::RCONTROL].contains(&k.vk)),
                 "no Ctrl transitions at all with {held:?}: {strokes:?}"
             );
             let keys: Vec<(u16, bool)> = strokes.iter().map(|k| (k.vk, k.up)).collect();
@@ -718,7 +720,7 @@ mod tests {
             strokes,
             vec![
                 KeyStroke {
-                    vk: vk::SHIFT,
+                    vk: vk::LSHIFT,
                     scan: 0x2A,
                     up: false,
                     extended: false
@@ -736,7 +738,7 @@ mod tests {
                     extended: true
                 },
                 KeyStroke {
-                    vk: vk::SHIFT,
+                    vk: vk::LSHIFT,
                     scan: 0x2A,
                     up: true,
                     extended: false
@@ -770,7 +772,7 @@ mod tests {
     #[test]
     fn map_vk_gives_v_a_scan_code() {
         assert_ne!(windows_scan_code(vk::V), 0);
-        assert_ne!(windows_scan_code(vk::CONTROL), 0);
+        assert_ne!(windows_scan_code(vk::LCONTROL), 0);
     }
 
     // ---- Linux frames ---------------------------------------------------
