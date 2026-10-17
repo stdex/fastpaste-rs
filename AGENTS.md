@@ -467,15 +467,12 @@ The procedure is in the README ("Releasing"); the files are in
   (`env -u LD_PRELOAD -u DISPLAY -u WAYLAND_DISPLAY dbus-run-session --
   kwin_wayland --virtual --socket fp-test --xwayland --exit-with-session
   <script>`), with `XDG_DATA_HOME` / `XDG_CONFIG_HOME` in a scratch dir.
-  Three things got in the way:
+  Two things got in the way:
   - EGL is loaded only when a window is created, and at startup there
     is none — the tray is the way in, and the isolated D-Bus has no
     StatusNotifierWatcher. A `fastpaste.sqlite` of a few KB of random
     bytes reads as an encrypted database and puts the unlock dialog up
     at once.
-  - The single-instance key is derived from the data dir and must fit
-    an abstract socket address (107 bytes), so a long scratch path fails
-    startup with "new abstract addr error". Use a short one.
   - Scanning the binary for sonames (`grep -ao`) works only on a
     **debug** build: in release, short strings such as `libEGL.so.1`
     are folded into `mov` immediates and are not in the file as text.

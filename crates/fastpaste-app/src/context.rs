@@ -156,37 +156,46 @@ fn paste_config(p: &PasteSettings) -> PasteConfig {
     }
 }
 
+/// The longest key [`instance_key_for`] returns. Linux binds the key as an
+/// abstract Unix socket, whose address holds 107 bytes; a Win32 mutex name
+/// may be longer. This stays under the smaller limit with a little margin.
+const INSTANCE_KEY_MAX: usize = 100;
+
+/// 64-bit FNV-1a. The key needs a hash that never changes between builds,
+/// which std's `DefaultHasher` does not promise.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &b| {
+        (hash ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
 /// Build the single-instance key for a data directory.
 ///
 /// The path cannot go in verbatim. A Win32 named mutex may not contain a
 /// backslash — the character is reserved for the `Global\\`/`Local\\`
 /// namespace prefix — and every Windows data dir is full of them, so the
 /// obvious `format!("...{}", dir.display())` produces a name the OS
-/// rejects. Names are length-limited there too.
+/// rejects. Names are length-limited, too, and much more tightly on Linux
+/// (see [`INSTANCE_KEY_MAX`]).
 ///
-/// Replacing every non-alphanumeric character keeps the mapping distinct
-/// enough for this purpose: two directories can only collide if they
-/// differ solely in separators, which cannot happen for absolute paths
-/// on one machine.
+/// So the key is the end of the path with every other character replaced
+/// by `_` — there to make the key readable in the log — followed by a hash
+/// of the whole path, which is what keeps two directories apart once the
+/// path has been cut to fit or its separators replaced.
 fn instance_key_for(data_dir: &std::path::Path) -> String {
+    const PREFIX: &str = "fastpaste_instance_";
+    let hash = fnv1a_64(data_dir.as_os_str().as_encoded_bytes());
     let sanitised: String = data_dir
         .display()
         .to_string()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
-    // Keep well inside the Windows limit while leaving the tail — the
-    // part that actually distinguishes users — intact.
-    const MAX: usize = 180;
-    let tail: String = if sanitised.chars().count() > MAX {
-        sanitised
-            .chars()
-            .skip(sanitised.chars().count() - MAX)
-            .collect()
-    } else {
-        sanitised
-    };
-    format!("fastpaste_instance_{tail}")
+    // `_` and 16 hex digits follow the tail. Every character is ASCII by
+    // now, so any byte index is a character boundary.
+    let room = INSTANCE_KEY_MAX - PREFIX.len() - 17;
+    let tail = &sanitised[sanitised.len().saturating_sub(room)..];
+    format!("{PREFIX}{tail}_{hash:016x}")
 }
 
 /// What [`AppContext::probe`] learned before anything was opened.
@@ -498,7 +507,7 @@ mod tests {
         );
         assert!(!key.contains(':'), "a colon is reserved too: {key}");
         assert!(key.starts_with("fastpaste_instance_"));
-        assert!(key.len() < 200, "names are length-limited on Windows");
+        assert!(key.len() <= INSTANCE_KEY_MAX);
     }
 
     #[test]
@@ -509,14 +518,62 @@ mod tests {
     }
 
     #[test]
-    fn a_very_long_path_keeps_its_distinguishing_tail() {
+    fn the_same_data_dir_always_gets_the_same_key() {
+        let dir = std::path::Path::new("/home/ada/.local/share/fastpaste");
+        assert_eq!(instance_key_for(dir), instance_key_for(dir));
+    }
+
+    /// Linux binds the key as an abstract Unix socket, whose address holds
+    /// 107 bytes. A longer key failed startup with "new abstract addr
+    /// error" for any data dir path past about 90 characters.
+    #[test]
+    fn a_very_long_path_fits_an_abstract_socket_address() {
         let deep = format!("/home/ada/{}/fastpaste", "x".repeat(400));
         let key = instance_key_for(std::path::Path::new(&deep));
-        assert!(key.len() < 220);
-        assert!(
-            key.ends_with("fastpaste"),
-            "the tail identifies the dir: {key}"
+        assert!(key.len() <= 107, "{} bytes: {key}", key.len());
+    }
+
+    /// The constraint itself, not a number: the key of a long data dir can
+    /// actually be claimed. Unique per run, so parallel runs do not meet.
+    #[test]
+    fn the_key_of_a_long_data_dir_can_be_claimed() {
+        let deep = format!(
+            "/tmp/fastpaste-test-{}/{}/data",
+            std::process::id(),
+            "nested-directory/".repeat(10)
         );
+        let key = instance_key_for(std::path::Path::new(&deep));
+        let guard = SingleInstance::new(&key).expect("the key is a valid instance name");
+        assert!(guard.is_single());
+    }
+
+    /// Cutting the path to fit must not merge two directories: these share
+    /// everything but their first component.
+    #[test]
+    fn long_paths_that_differ_only_at_the_start_get_different_keys() {
+        let tail = format!("{}/fastpaste", "x".repeat(300));
+        let a = instance_key_for(std::path::Path::new(&format!("/home/ada/{tail}")));
+        let b = instance_key_for(std::path::Path::new(&format!("/home/bob/{tail}")));
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_long_key_keeps_the_distinguishing_tail_readable() {
+        let deep = format!("/home/ada/{}/fastpaste", "x".repeat(400));
+        let key = instance_key_for(std::path::Path::new(&deep));
+        // `…_fastpaste_` and then the 16 hex digits of the hash.
+        let readable = &key[..key.len() - 17];
+        assert!(readable.ends_with("x_fastpaste"), "{key}");
+    }
+
+    /// The hash is part of the key, so it must not change between builds or
+    /// toolchains, as std's `DefaultHasher` may. These are FNV-1a's
+    /// published test vectors.
+    #[test]
+    fn the_key_hash_is_fnv1a_64() {
+        assert_eq!(fnv1a_64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a_64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        assert_eq!(fnv1a_64(b"foobar"), 0x8594_4171_f739_67e8);
     }
 
     #[test]
